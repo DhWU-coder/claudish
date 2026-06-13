@@ -25,11 +25,12 @@ import {
   copyFileSync,
   readdirSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { getModelMapping, loadConfig, loadLocalConfig } from "./profile-config.js";
+import { getModelMapping, loadConfig, loadLocalConfig, setDefaultModel } from "./profile-config.js";
 import { buildLegacyHint, resolveDefaultProvider } from "./default-provider.js";
 import { parseModelSpec } from "./providers/model-parser.js";
 import { type FallbackRoute } from "./providers/auto-route.js";
@@ -38,22 +39,11 @@ import {
   matchRoutingRule,
   buildRoutingChain,
 } from "./providers/routing-rules.js";
-import {
-  resolveApiKeyProvenance,
-  type KeyProvenance,
-} from "./providers/api-key-provenance.js";
+import { resolveApiKeyProvenance, type KeyProvenance } from "./providers/api-key-provenance.js";
 import { API_KEY_MAP } from "./providers/api-key-map.js";
-import {
-  probeLink,
-  describeProbeState,
-  type ProbeResult,
-} from "./providers/probe-live.js";
+import { probeLink, describeProbeState, type ProbeResult } from "./providers/probe-live.js";
 import { startProbeTui } from "./probe/probe-tui-runtime.js";
-import type {
-  ProbeAppState,
-  ProbeLinkState,
-  ProbeStepState,
-} from "./probe/probe-tui-app.js";
+import type { ProbeAppState, ProbeLinkState, ProbeStepState } from "./probe/probe-tui-app.js";
 import {
   printProbeResults,
   type ModelResult as PrintableModelResult,
@@ -136,7 +126,10 @@ export function parseAdvisorFlag(value: string): {
     collectorPart = undefined;
   }
 
-  const models = advisorPart.split(",").map(s => s.trim()).filter(Boolean);
+  const models = advisorPart
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   let collector: string | null;
   if (models.length <= 1) {
@@ -173,14 +166,22 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
     claudeArgs: [],
   };
 
-  // Check for environment variable overrides
-  // Priority order: CLAUDISH_MODEL (Claudish-specific) > ANTHROPIC_MODEL (Claude Code standard)
+  // Check for config/env overrides.
+  // Priority order: CLI --model (handled later) > CLAUDISH_MODEL > config.defaultModel
+  // > ANTHROPIC_MODEL (Claude Code standard fallback).
   // CLI --model flag will override both (handled later in arg parsing)
+  let fileConfig = null as ReturnType<typeof loadConfig> | null;
+  try {
+    fileConfig = loadConfig();
+  } catch {}
+
   const claudishModel = process.env[ENV.CLAUDISH_MODEL];
   const anthropicModel = process.env[ENV.ANTHROPIC_MODEL];
 
   if (claudishModel) {
     config.model = claudishModel; // Claudish-specific takes priority
+  } else if (fileConfig?.defaultModel) {
+    config.model = fileConfig.defaultModel;
   } else if (anthropicModel) {
     config.model = anthropicModel; // Fall back to Claude Code standard
   }
@@ -213,10 +214,7 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
   // Load diagMode from settings file (lowest priority — env/CLI override)
   try {
     const fileConfig = loadConfig();
-    if (
-      fileConfig.diagMode &&
-      ["auto", "logfile", "off"].includes(fileConfig.diagMode)
-    ) {
+    if (fileConfig.diagMode && ["auto", "logfile", "off"].includes(fileConfig.diagMode)) {
       config.diagMode = fileConfig.diagMode;
     }
   } catch {}
@@ -297,7 +295,9 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
     } else if (arg === "--advisor") {
       const modelsArg = args[++i];
       if (!modelsArg) {
-        console.error("--advisor requires a comma-separated list of models (e.g., 'gemini-3-pro,grok-3')");
+        console.error(
+          "--advisor requires a comma-separated list of models (e.g., 'gemini-3-pro,grok-3')"
+        );
         process.exit(1);
       }
       const parsed = parseAdvisorFlag(modelsArg);
@@ -322,6 +322,15 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
         process.exit(1);
       }
       config.defaultProvider = dpArg;
+    } else if (arg === "--default-model") {
+      const modelArg = args[++i];
+      if (!modelArg) {
+        console.error("--default-model requires a model name");
+        process.exit(1);
+      }
+      setDefaultModel(modelArg);
+      console.log(`Default model saved to ~/.claudish/config.json: ${modelArg}`);
+      process.exit(0);
     } else if (arg === "--cost-tracker") {
       // Enable cost tracking for this session
       config.costTracking = true;
@@ -411,7 +420,7 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
         process.exit(0);
       } catch (err) {
         console.error(
-          `Failed to fetch providers: ${err instanceof Error ? err.message : String(err)}`,
+          `Failed to fetch providers: ${err instanceof Error ? err.message : String(err)}`
         );
         process.exit(1);
       }
@@ -434,9 +443,7 @@ export async function parseArgs(args: string[]): Promise<ClaudishConfig> {
       // passthrough swallow it later because we exit before that.
       const providerIdx = args.indexOf("--provider");
       const providerSlug =
-        providerIdx !== -1 && providerIdx + 1 < args.length
-          ? args[providerIdx + 1]
-          : null;
+        providerIdx !== -1 && providerIdx + 1 < args.length ? args[providerIdx + 1] : null;
 
       if (forceUpdate) clearAllModelCaches();
 
@@ -798,9 +805,7 @@ function renderModelDocTable(models: Array<ModelDoc & { rank?: number }>, showRa
   console.log(header);
   console.log("  " + "─".repeat(80));
   for (const m of models) {
-    const rankCell = showRank
-      ? String(m.rank ?? "").padStart(3) + "  "
-      : "     ";
+    const rankCell = showRank ? String(m.rank ?? "").padStart(3) + "  " : "     ";
     const rawId = m.modelId;
     const id = rawId.length > 30 ? rawId.substring(0, 27) + "..." : rawId;
     const idPadded = id.padEnd(30);
@@ -1032,10 +1037,8 @@ async function printRecommendedModels(jsonOutput: boolean, forceUpdate: boolean)
     pickLines.push(
       `    Large ctx    → ${picks.largeContext.id} (${picks.largeContext.context || "N/A"})`
     );
-  if (picks.mostCapable)
-    pickLines.push(`    Most capable → ${picks.mostCapable.id}`);
-  if (picks.visionCoding)
-    pickLines.push(`    Vision+code  → ${picks.visionCoding.id}`);
+  if (picks.mostCapable) pickLines.push(`    Most capable → ${picks.mostCapable.id}`);
+  if (picks.visionCoding) pickLines.push(`    Vision+code  → ${picks.visionCoding.id}`);
   if (picks.agentic) pickLines.push(`    Agentic      → ${picks.agentic.id}`);
 
   if (pickLines.length > 0) {
@@ -1045,7 +1048,8 @@ async function printRecommendedModels(jsonOutput: boolean, forceUpdate: boolean)
   }
 
   console.log("");
-  console.log("  Set default:  export CLAUDISH_MODEL=<model>");
+  console.log("  Set default:  claudish --default-model <model>");
+  console.log("                 or:  export CLAUDISH_MODEL=<model>");
   console.log("                 or:  claudish --model <model> ...");
   console.log("");
   console.log("  For more: claudish --list-models                (browse full catalog)");
@@ -1373,7 +1377,11 @@ async function probeModelRouting(
       console.log(JSON.stringify(results, null, 2));
     } finally {
       if (liveProxy) {
-        try { await liveProxy.shutdown(); } catch { /* ignore */ }
+        try {
+          await liveProxy.shutdown();
+        } catch {
+          /* ignore */
+        }
       }
     }
     return;
@@ -1533,11 +1541,13 @@ async function probeModelRouting(
             credentialHint: link.credentialHint,
           },
           options.timeoutMs
-        ).catch((e): ProbeResult => ({
-          state: "error",
-          latencyMs: 0,
-          errorMessage: String(e instanceof Error ? e.message : e),
-        }));
+        ).catch(
+          (e): ProbeResult => ({
+            state: "error",
+            latencyMs: 0,
+            errorMessage: String(e instanceof Error ? e.message : e),
+          })
+        );
 
         if (result.state === "live") {
           updateLink(link.id, { status: "live", endTime: Date.now() });
@@ -1591,7 +1601,11 @@ async function probeModelRouting(
     // the component tree from progress-bars to a wide results table garbled
     // the final panel.
     if (liveProxy) {
-      try { await liveProxy.shutdown(); } catch { /* ignore */ }
+      try {
+        await liveProxy.shutdown();
+      } catch {
+        /* ignore */
+      }
       liveProxy = null;
     }
     await tui.shutdown();
@@ -1600,7 +1614,11 @@ async function probeModelRouting(
     printProbeResults(printable, isLiveProbe);
   } finally {
     if (liveProxy) {
-      try { await liveProxy.shutdown(); } catch { /* ignore */ }
+      try {
+        await liveProxy.shutdown();
+      } catch {
+        /* ignore */
+      }
     }
     await tui.shutdown();
   }
@@ -1615,7 +1633,7 @@ claudish - Run Claude Code with any AI model (OpenRouter, Gemini, OpenAI, MiniMa
 
 USAGE:
   claudish                                # Interactive mode (default, shows model selector)
-  claudish [OPTIONS] <claude-args...>     # Single-shot mode (requires --model)
+  claudish [OPTIONS] <claude-args...>     # Single-shot mode (--model or default model)
   claudish --team a,b,c "prompt"          # Run models in parallel (magmux grid)
   claudish --team a,b,c -f input.md       # Team mode with file input
 
@@ -1669,6 +1687,8 @@ OPTIONS:
   -i, --interactive        Run in interactive mode (default when no prompt given)
   -m, --model <model>      OpenRouter model to use (required for single-shot mode)
   -p, --profile <name>     Use named profile for model mapping (default: uses default profile)
+  --default-model <model>  Save the default model to ~/.claudish/config.json and exit
+  --set-provider           Add an OpenAI/Anthropic/Gemini-compatible custom provider
   --default-provider <name> Default provider for bare model names (builtin or customEndpoints key)
                            Precedence: this flag > CLAUDISH_DEFAULT_PROVIDER env > config.json
   --port <port>            Proxy server port (default: random)
@@ -1761,7 +1781,7 @@ CUSTOM MODELS:
 
 MODES:
   • Interactive mode (default): Shows model selector, starts persistent session
-  • Single-shot mode: Runs one task in headless mode and exits (requires --model)
+  • Single-shot mode: Runs one task in headless mode and exits (requires --model or a default model)
 
 NOTES:
   • Permission prompts are ENABLED by default (normal Claude Code behavior)
@@ -1815,7 +1835,7 @@ ENVIRONMENT VARIABLES:
   MLX_BASE_URL                    MLX server (default: http://127.0.0.1:8080)
 
   Model settings:
-  CLAUDISH_MODEL                  Default model to use (default: openai/gpt-5.3)
+  CLAUDISH_MODEL                  Default model for this shell (overrides config default)
   CLAUDISH_PORT                   Default port for proxy
   CLAUDISH_CONTEXT_WINDOW         Override context window size
 
@@ -2055,10 +2075,7 @@ function printAvailableModels(): void {
     console.log("");
   } catch (error) {
     console.error(
-      `Failed to load available models: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+      `Failed to load available models: ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }
-

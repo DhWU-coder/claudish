@@ -14,23 +14,31 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { normalizeCodexModel } from "../../adapters/codex-api-format.js";
+import { CodexOAuth } from "../../auth/codex-oauth.js";
 import { log } from "../../logger.js";
 import { OpenAIProviderTransport } from "./openai.js";
-import { CodexOAuth } from "../../auth/codex-oauth.js";
-import { normalizeCodexModel } from "../../adapters/codex-api-format.js";
+
+const OPENCLAW_ATTRIBUTION_ORIGINATOR = "openclaw";
+const OPENCLAW_ATTRIBUTION_VERSION =
+  process.env.OPENCLAW_VERSION || process.env.OPENCLAW_SERVICE_VERSION || "unknown";
+
+function getCodexCredentialsPath(): string {
+  const claudishDir = process.env.CLAUDISH_HOME || join(homedir(), ".claudish");
+  return join(claudishDir, "codex-oauth.json");
+}
 
 function buildOAuthHeaders(token: string, accountId?: string): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
-    "OpenAI-Beta": "responses=experimental",
-    originator: "codex_cli_rs",
-    accept: "text/event-stream",
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+    originator: OPENCLAW_ATTRIBUTION_ORIGINATOR,
+    version: OPENCLAW_ATTRIBUTION_VERSION,
+    "User-Agent": `${OPENCLAW_ATTRIBUTION_ORIGINATOR}/${OPENCLAW_ATTRIBUTION_VERSION}`,
   };
   if (accountId) {
     headers["chatgpt-account-id"] = accountId;
-    // Add conversation/session headers for stateless operation
-    headers["x-conversation-id"] = "claudish-session";
-    headers["x-session-id"] = "claudish-session";
   }
   return headers;
 }
@@ -53,11 +61,11 @@ export class OpenAICodexTransport extends OpenAIProviderTransport {
    */
   getEndpoint(): string {
     // Check if OAuth credentials exist (synchronous check)
-    const credPath = join(homedir(), ".claudish", "codex-oauth.json");
+    const credPath = getCodexCredentialsPath();
     if (existsSync(credPath)) {
       try {
         const creds = JSON.parse(readFileSync(credPath, "utf-8"));
-        if (creds.access_token && creds.refresh_token) {
+        if (hasOAuthCredentialPair(creds)) {
           // OAuth tokens work with chatgpt.com/backend-api
           return `${CHATGPT_API_URL}/responses`;
         }
@@ -74,16 +82,17 @@ export class OpenAICodexTransport extends OpenAIProviderTransport {
    * Returns null if no valid OAuth credentials are available.
    */
   private async tryOAuthHeaders(): Promise<Record<string, string> | null> {
-    const credPath = join(homedir(), ".claudish", "codex-oauth.json");
+    const credPath = getCodexCredentialsPath();
     if (!existsSync(credPath)) return null;
 
     try {
       const creds = JSON.parse(readFileSync(credPath, "utf-8"));
-      if (!creds.access_token || !creds.refresh_token) return null;
+      const flatCreds = flattenCodexCredentials(creds);
+      if (!flatCreds) return null;
 
       // Check if token needs refresh
       const buffer = 5 * 60 * 1000;
-      if (creds.expires_at && Date.now() > creds.expires_at - buffer) {
+      if (flatCreds.expires_at && Date.now() > flatCreds.expires_at - buffer) {
         const oauth = CodexOAuth.getInstance();
         const token = await oauth.getAccessToken();
         log("[OpenAI Codex] Using refreshed OAuth token");
@@ -92,7 +101,7 @@ export class OpenAICodexTransport extends OpenAIProviderTransport {
 
       // Token still valid
       log("[OpenAI Codex] Using OAuth token (subscription)");
-      return buildOAuthHeaders(creds.access_token, creds.account_id);
+      return buildOAuthHeaders(flatCreds.access_token, flatCreds.account_id);
     } catch (e) {
       log(`[OpenAI Codex] OAuth credential read failed: ${e}, falling back to API key`);
       return null;
@@ -106,20 +115,54 @@ export class OpenAICodexTransport extends OpenAIProviderTransport {
    */
   transformPayload(payload: any): any {
     log(`[OpenAI Codex] transformPayload called - payload.model: "${payload?.model}"`);
+    let transformedPayload = payload;
     if (payload?.model) {
       const normalized = normalizeCodexModel(payload.model);
       if (normalized !== payload.model) {
         log(`[OpenAI Codex] Normalized model: ${payload.model} → ${normalized}`);
-        payload = { ...payload, model: normalized };
+        transformedPayload = { ...payload, model: normalized };
       }
     }
     // Add Codex-specific fields that the opencode reference implementation uses
     // store: false = stateless operation (required by ChatGPT backend for Codex)
     // include: reasoning.encrypted_content = for reasoning continuity across turns
     return {
-      ...payload,
+      ...transformedPayload,
       store: false,
       include: ["reasoning.encrypted_content"],
     };
   }
+}
+
+function hasOAuthCredentialPair(creds: any): boolean {
+  return !!flattenCodexCredentials(creds);
+}
+
+function flattenCodexCredentials(creds: any): {
+  access_token: string;
+  refresh_token: string;
+  expires_at?: number;
+  account_id?: string;
+} | null {
+  if (typeof creds?.access_token === "string" && typeof creds?.refresh_token === "string") {
+    return {
+      access_token: creds.access_token,
+      refresh_token: creds.refresh_token,
+      expires_at: typeof creds.expires_at === "number" ? creds.expires_at : undefined,
+      account_id: typeof creds.account_id === "string" ? creds.account_id : undefined,
+    };
+  }
+  if (
+    creds?.auth_mode === "chatgpt" &&
+    typeof creds.tokens?.access_token === "string" &&
+    typeof creds.tokens?.refresh_token === "string"
+  ) {
+    return {
+      access_token: creds.tokens.access_token,
+      refresh_token: creds.tokens.refresh_token,
+      expires_at: typeof creds.expires === "number" ? creds.expires : undefined,
+      account_id: typeof creds.tokens.account_id === "string" ? creds.tokens.account_id : undefined,
+    };
+  }
+  return null;
 }

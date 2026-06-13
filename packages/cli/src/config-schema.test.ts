@@ -14,12 +14,27 @@ describe("CustomEndpointSimpleSchema", () => {
       url: "https://api.example.com/v1",
       format: "openai" as const,
       apiKey: "sk-test-1234",
+      defaultModel: "gpt-4o",
       modelPrefix: "example/",
       models: ["model-a", "model-b"],
     };
 
     const parsed = CustomEndpointSchema.parse(input);
     expect(parsed).toEqual(input);
+  });
+
+  test("accepts a Gemini-compatible simple endpoint", () => {
+    const input = {
+      kind: "simple" as const,
+      url: "https://generativelanguage.googleapis.com",
+      format: "gemini" as const,
+      apiKey: "gemini-key",
+      defaultModel: "gemini-2.5-flash",
+    };
+
+    const parsed = CustomEndpointSimpleSchema.parse(input);
+    expect(parsed.format).toBe("gemini");
+    expect(parsed.defaultModel).toBe("gemini-2.5-flash");
   });
 
   test("accepts minimal simple endpoint without optional fields", () => {

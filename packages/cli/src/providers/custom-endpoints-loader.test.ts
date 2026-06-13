@@ -7,6 +7,7 @@ import type { ClaudishProfileConfig } from "../profile-config.js";
 import {
   loadCustomEndpoints,
   resolveCustomEndpointApiKey,
+  resolveCustomEndpointDefaultModel,
 } from "./custom-endpoints-loader.js";
 import {
   clearRuntimeRegistry,
@@ -15,9 +16,7 @@ import {
 } from "./runtime-providers.js";
 
 // Minimal ClaudishProfileConfig stub — only the fields the loader reads.
-function makeConfig(
-  customEndpoints?: Record<string, unknown>
-): ClaudishProfileConfig {
+function makeConfig(customEndpoints?: Record<string, unknown>): ClaudishProfileConfig {
   return {
     version: "1.0.0",
     defaultProfile: "default",
@@ -62,6 +61,30 @@ describe("custom-endpoints-loader", () => {
     expect(def?.isDirectApi).toBe(true);
 
     expect(getRuntimeProfiles().get("my-vllm")).toBeDefined();
+  });
+
+  test("valid simple gemini endpoint: registers gemini transport and default model alias", () => {
+    const config = makeConfig({
+      "my-gemini": {
+        kind: "simple",
+        url: "https://generativelanguage.googleapis.com",
+        format: "gemini",
+        apiKey: "${MY_GEMINI_KEY}",
+        defaultModel: "gemini-2.5-flash",
+      },
+    });
+
+    const result = loadCustomEndpoints(config);
+
+    expect(result.registered).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(getRuntimeProviders().get("my-gemini")?.transport).toBe("gemini");
+    expect(resolveCustomEndpointDefaultModel("my-gemini", config)).toBe(
+      "my-gemini@gemini-2.5-flash"
+    );
+    expect(resolveCustomEndpointDefaultModel("my-gemini@gemini-3-pro", config)).toBe(
+      "my-gemini@gemini-3-pro"
+    );
   });
 
   test("valid complex endpoint with litellm transport: registers", () => {

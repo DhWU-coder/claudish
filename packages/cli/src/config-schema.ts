@@ -33,8 +33,9 @@ export const BuiltinDefaultProviderSchema = z.enum([
 export const CustomEndpointSimpleSchema = z.object({
   kind: z.literal("simple"),
   url: z.url(),
-  format: z.enum(["openai", "anthropic"]),
+  format: z.enum(["openai", "anthropic", "gemini"]),
   apiKey: z.string().min(1),
+  defaultModel: z.string().min(1).optional(),
   modelPrefix: z.string().optional(),
   models: z.array(z.string()).optional(),
 });
@@ -51,13 +52,7 @@ export const CustomEndpointComplexSchema = z.object({
   authScheme: z.enum(["bearer", "x-api-key"]).optional(),
   headers: z.record(z.string(), z.string()).optional(),
   streamFormat: z
-    .enum([
-      "openai-sse",
-      "openai-responses-sse",
-      "gemini-sse",
-      "anthropic-sse",
-      "ollama-jsonl",
-    ])
+    .enum(["openai-sse", "openai-responses-sse", "gemini-sse", "anthropic-sse", "ollama-jsonl"])
     .optional(),
   modelPrefix: z.string().optional(),
   models: z.array(z.string()).optional(),
@@ -70,10 +65,7 @@ export const CustomEndpointSchema = z.discriminatedUnion("kind", [
 
 // defaultProvider can be a builtin OR the name of a custom endpoint
 // (we validate the cross-reference at load time, not in the schema).
-export const DefaultProviderSchema = z.union([
-  BuiltinDefaultProviderSchema,
-  z.string().min(1),
-]);
+export const DefaultProviderSchema = z.union([BuiltinDefaultProviderSchema, z.string().min(1)]);
 
 export type BuiltinDefaultProvider = z.infer<typeof BuiltinDefaultProviderSchema>;
 export type CustomEndpointSimple = z.infer<typeof CustomEndpointSimpleSchema>;

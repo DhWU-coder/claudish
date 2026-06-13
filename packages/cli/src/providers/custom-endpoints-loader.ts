@@ -22,24 +22,20 @@ import {
   type CustomEndpointComplex,
 } from "../config-schema.js";
 import type { ClaudishProfileConfig } from "../profile-config.js";
-import type {
-  ProviderDefinition,
-  TransportType,
-} from "./provider-definitions.js";
+import type { ProviderDefinition, TransportType } from "./provider-definitions.js";
 import type { ProviderProfile, ProfileContext } from "./provider-profiles.js";
 import type { ModelHandler } from "../handlers/types.js";
 import type { RemoteProvider } from "../handlers/shared/remote-provider-types.js";
-import {
-  registerRuntimeProvider,
-  registerRuntimeProfile,
-} from "./runtime-providers.js";
+import { registerRuntimeProvider, registerRuntimeProfile } from "./runtime-providers.js";
 import { ComposedHandler } from "../handlers/composed-handler.js";
 import { OpenAIProviderTransport } from "./transport/openai.js";
 import { AnthropicProviderTransport } from "./transport/anthropic-compat.js";
 import { LiteLLMProviderTransport } from "./transport/litellm.js";
+import { GeminiProviderTransport } from "./transport/gemini-apikey.js";
 import { OpenAIAPIFormat } from "../adapters/openai-api-format.js";
 import { AnthropicAPIFormat } from "../adapters/anthropic-api-format.js";
 import { LiteLLMAPIFormat } from "../adapters/litellm-api-format.js";
+import { GeminiAPIFormat } from "../adapters/gemini-api-format.js";
 
 /**
  * Result of loading custom endpoints from a config object.
@@ -87,18 +83,23 @@ export function loadCustomEndpoints(config: ClaudishProfileConfig): LoadResult {
  * (getProviderByName, getAllProviders, etc.). The definition is minimal —
  * real handler construction happens in the profile.
  */
-function buildProviderDefinition(
-  name: string,
-  ep: CustomEndpoint
-): ProviderDefinition {
+function buildProviderDefinition(name: string, ep: CustomEndpoint): ProviderDefinition {
   if (ep.kind === "simple") {
+    const transport =
+      ep.format === "openai" ? "openai" : ep.format === "anthropic" ? "anthropic" : "gemini";
+    const apiPath =
+      ep.format === "openai"
+        ? "/chat/completions"
+        : ep.format === "anthropic"
+          ? "/v1/messages"
+          : "/v1beta/models/{model}:streamGenerateContent?alt=sse";
     return {
       name,
       displayName: name,
-      transport: ep.format as TransportType,
+      transport: transport as TransportType,
       baseUrl: stripTrailingSlash(ep.url),
-      apiPath: "/chat/completions",
-      apiKeyEnvVar: `CUSTOM_${sanitizeEnvName(name)}_KEY`,
+      apiPath,
+      apiKeyEnvVar: "",
       apiKeyDescription: `${name} (custom endpoint)`,
       apiKeyUrl: "",
       shortcuts: [name],
@@ -116,7 +117,7 @@ function buildProviderDefinition(
     transport: ep.transport as TransportType,
     baseUrl: stripTrailingSlash(ep.baseUrl),
     apiPath: ep.apiPath ?? "/v1/chat/completions",
-    apiKeyEnvVar: `CUSTOM_${sanitizeEnvName(name)}_KEY`,
+    apiKeyEnvVar: "",
     apiKeyDescription: `${ep.displayName} (custom endpoint)`,
     apiKeyUrl: "",
     shortcuts: [name],
@@ -168,6 +169,23 @@ function buildSimpleHandler(
     return new ComposedHandler(transport, ctx.targetModel, finalModel, ctx.port, {
       adapter,
       tokenStrategy: "delta-aware",
+      ...ctx.sharedOpts,
+    });
+  }
+
+  if (ep.format === "gemini") {
+    const remoteProvider: RemoteProvider = {
+      name: ctx.provider.name,
+      baseUrl,
+      apiPath: "/v1beta/models/{model}:streamGenerateContent?alt=sse",
+      apiKeyEnvVar: ctx.provider.apiKeyEnvVar,
+      prefixes: ctx.provider.prefixes ?? [],
+      headers: ctx.provider.headers,
+    };
+    const transport = new GeminiProviderTransport(remoteProvider, finalModel, apiKey);
+    const adapter = new GeminiAPIFormat(finalModel);
+    return new ComposedHandler(transport, ctx.targetModel, finalModel, ctx.port, {
+      adapter,
       ...ctx.sharedOpts,
     });
   }
@@ -270,10 +288,26 @@ export function resolveCustomEndpointApiKey(ep: CustomEndpoint): string {
   return process.env[match[1]] ?? "";
 }
 
-function stripTrailingSlash(url: string): string {
-  return url.replace(/\/+$/, "");
+export function resolveCustomEndpointDefaultModel(
+  modelId: string,
+  config: ClaudishProfileConfig
+): string {
+  if (!modelId || modelId.includes("@") || modelId.includes("/")) return modelId;
+
+  const entry = config.customEndpoints?.[modelId];
+  if (!entry) return modelId;
+
+  const parsed = CustomEndpointSchema.safeParse(entry);
+  if (!parsed.success) return modelId;
+
+  const endpoint = parsed.data;
+  if (endpoint.kind === "simple" && endpoint.defaultModel) {
+    return `${modelId}@${endpoint.defaultModel}`;
+  }
+
+  return modelId;
 }
 
-function sanitizeEnvName(name: string): string {
-  return name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
 }

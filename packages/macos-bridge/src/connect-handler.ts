@@ -1,12 +1,44 @@
 import * as fs from "node:fs";
 import type * as http from "node:http";
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import type { CertificateManager } from "./certificate-manager";
 import { CycleTLSManager } from "./cycletls-manager";
 import { HTTPRequestParser, type ParsedHTTPRequest } from "./http-parser";
 import type { ApiKeys, LogEntry } from "./types";
+
+export function isSensitiveDebugDumpEnabled(
+  env: Pick<NodeJS.ProcessEnv, "CLAUDISH_BRIDGE_DEBUG_DUMP"> = process.env
+): boolean {
+  return env.CLAUDISH_BRIDGE_DEBUG_DUMP === "1";
+}
+
+export function getSensitiveDebugDumpPath(
+  category: string,
+  filename: string,
+  homeDir = os.homedir()
+): string {
+  const safeCategory = category.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  return path.join(homeDir, ".claudish-proxy", "debug", `${safeCategory}_${safeFilename}`);
+}
+
+function writeSensitiveDebugDump(
+  category: string,
+  filename: string,
+  data: string | Buffer
+): string | null {
+  if (!isSensitiveDebugDumpEnabled()) return null;
+  const filePath = getSensitiveDebugDumpPath(category, filename);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.dirname(filePath), 0o700);
+  fs.writeFileSync(filePath, data, { mode: 0o600 });
+  fs.chmodSync(filePath, 0o600);
+  return filePath;
+}
 
 /**
  * Traffic entry for logging intercepted requests
@@ -208,8 +240,7 @@ export class CONNECTHandler {
     this.routingConfig = config;
     const msg = `[CONNECTHandler] Routing ${config.enabled ? "enabled" : "disabled"}, ${Object.keys(config.modelMap).length} mappings: ${JSON.stringify(config.modelMap)}`;
     console.log(msg);
-    // Debug: write to file
-    fs.appendFileSync("/tmp/claudish-routing.log", `${new Date().toISOString()} ${msg}\n`);
+    writeSensitiveDebugDump("routing", "routing.log", `${new Date().toISOString()} ${msg}\n`);
   }
 
   /**
@@ -670,7 +701,9 @@ export class CONNECTHandler {
     if (conversationId) {
       const history = this.injectedMessages.get(conversationId);
       if (history && history.length > 0) {
-        console.log(`[CONNECTHandler] 📚 Including ${history.length} messages from conversation history`);
+        console.log(
+          `[CONNECTHandler] 📚 Including ${history.length} messages from conversation history`
+        );
         for (const msg of history) {
           const text = msg.content[0]?.text || "";
           if (text) {
@@ -752,7 +785,7 @@ export class CONNECTHandler {
     }
 
     // Check if there's a routing target for this model
-    let targetModel = sourceModel ? (this.routingConfig.modelMap[sourceModel] || null) : null;
+    let targetModel = sourceModel ? this.routingConfig.modelMap[sourceModel] || null : null;
 
     // FALLBACK: If we don't know the source model but routing is enabled,
     // check if all targets are the same (common case: route everything to one model)
@@ -763,12 +796,16 @@ export class CONNECTHandler {
         // All models route to the same target, use it as fallback
         targetModel = uniqueTargets[0];
         sourceModel = "unknown";
-        console.log(`[CONNECTHandler] 🎯 Model unknown but all routes go to ${targetModel}, using fallback`);
+        console.log(
+          `[CONNECTHandler] 🎯 Model unknown but all routes go to ${targetModel}, using fallback`
+        );
       } else if (targets.length > 0) {
         // Multiple targets, use the first one as best guess
         targetModel = targets[0];
         sourceModel = "unknown";
-        console.log(`[CONNECTHandler] 🎯 Model unknown, using first target as fallback: ${targetModel}`);
+        console.log(
+          `[CONNECTHandler] 🎯 Model unknown, using first target as fallback: ${targetModel}`
+        );
       }
     }
 
@@ -789,15 +826,17 @@ export class CONNECTHandler {
     targetHost: string
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      console.log(`[CONNECTHandler] 🌊 Streaming request to ${targetHost}${parsedRequest.path.substring(0, 50)}...`);
+      console.log(
+        `[CONNECTHandler] 🌊 Streaming request to ${targetHost}${parsedRequest.path.substring(0, 50)}...`
+      );
 
       // Build modified request without Accept-Encoding
-      const lines = parsedRequest.raw.toString('utf8').split('\r\n');
-      const modifiedLines = lines.filter(line => {
+      const lines = parsedRequest.raw.toString("utf8").split("\r\n");
+      const modifiedLines = lines.filter((line) => {
         const lower = line.toLowerCase();
-        return !lower.startsWith('accept-encoding:');
+        return !lower.startsWith("accept-encoding:");
       });
-      const modifiedRequest = modifiedLines.join('\r\n');
+      const modifiedRequest = modifiedLines.join("\r\n");
 
       // Connect to real server
       const serverConn = tls.connect({
@@ -862,19 +901,21 @@ export class CONNECTHandler {
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const timestamp = Date.now();
-      const logPrefix = `/tmp/traffic_${timestamp}`;
 
       // Build modified request without Accept-Encoding
-      const lines = parsedRequest.raw.toString('utf8').split('\r\n');
-      const modifiedLines = lines.filter(line => {
+      const lines = parsedRequest.raw.toString("utf8").split("\r\n");
+      const modifiedLines = lines.filter((line) => {
         const lower = line.toLowerCase();
-        return !lower.startsWith('accept-encoding:');
+        return !lower.startsWith("accept-encoding:");
       });
-      const modifiedRequest = modifiedLines.join('\r\n');
+      const modifiedRequest = modifiedLines.join("\r\n");
 
-      // Save request to file
-      fs.writeFileSync(`${logPrefix}_request.txt`, modifiedRequest);
-      console.log(`[CONNECTHandler] Saved request to ${logPrefix}_request.txt`);
+      const requestDump = writeSensitiveDebugDump(
+        "traffic",
+        `${timestamp}_request.txt`,
+        modifiedRequest
+      );
+      if (requestDump) console.log(`[CONNECTHandler] Saved request to ${requestDump}`);
 
       // Connect to real server
       const serverConn = tls.connect({
@@ -898,17 +939,17 @@ export class CONNECTHandler {
         // Log the first chunk with headers
         if (!firstChunkLogged) {
           firstChunkLogged = true;
-          const separator = Buffer.from('\r\n\r\n');
+          const separator = Buffer.from("\r\n\r\n");
           const headerEnd = data.indexOf(separator);
           if (headerEnd > 0) {
-            const headers = data.subarray(0, headerEnd).toString('utf8');
-            fs.writeFileSync(`${logPrefix}_response_headers.txt`, headers);
+            const headers = data.subarray(0, headerEnd).toString("utf8");
+            writeSensitiveDebugDump("traffic", `${timestamp}_response_headers.txt`, headers);
             console.log(`[CONNECTHandler] Response headers:\n${headers.substring(0, 500)}`);
 
             // Save body preview
             const bodyStart = headerEnd + 4;
-            const bodyPreview = data.subarray(bodyStart, bodyStart + 500).toString('utf8');
-            fs.writeFileSync(`${logPrefix}_body_preview.txt`, bodyPreview);
+            const bodyPreview = data.subarray(bodyStart, bodyStart + 500).toString("utf8");
+            writeSensitiveDebugDump("traffic", `${timestamp}_body_preview.txt`, bodyPreview);
             console.log(`[CONNECTHandler] Body preview: ${bodyPreview.substring(0, 200)}`);
           }
         }
@@ -922,8 +963,16 @@ export class CONNECTHandler {
       serverConn.on("end", () => {
         // Save complete response to file
         const fullResponse = Buffer.concat(responseChunks);
-        fs.writeFileSync(`${logPrefix}_response.bin`, fullResponse);
-        console.log(`[CONNECTHandler] Saved full response (${fullResponse.length} bytes) to ${logPrefix}_response.bin`);
+        const responseDump = writeSensitiveDebugDump(
+          "traffic",
+          `${timestamp}_response.bin`,
+          fullResponse
+        );
+        if (responseDump) {
+          console.log(
+            `[CONNECTHandler] Saved full response (${fullResponse.length} bytes) to ${responseDump}`
+          );
+        }
 
         if (!tlsSocket.destroyed) {
           tlsSocket.end();
@@ -965,7 +1014,9 @@ export class CONNECTHandler {
     try {
       const url = `https://${targetHost}${parsedRequest.path}`;
 
-      console.log(`[CONNECTHandler] 🔀 Fetching conversation for message injection: ${parsedRequest.path.slice(0, 80)}`);
+      console.log(
+        `[CONNECTHandler] 🔀 Fetching conversation for message injection: ${parsedRequest.path.slice(0, 80)}`
+      );
 
       // Remove headers that CycleTLS manages
       const headersWithoutCompression: Record<string, string> = {};
@@ -992,8 +1043,14 @@ export class CONNECTHandler {
 
       if (response.status !== 200) {
         // Non-200 response, just forward as-is
-        console.log(`[CONNECTHandler] Conversation fetch returned ${response.status}, forwarding without injection`);
-        const responseStr = this.buildHTTPResponse(response.status, response.headers, response.body);
+        console.log(
+          `[CONNECTHandler] Conversation fetch returned ${response.status}, forwarding without injection`
+        );
+        const responseStr = this.buildHTTPResponse(
+          response.status,
+          response.headers,
+          response.body
+        );
         tlsSocket.write(responseStr);
         return;
       }
@@ -1004,23 +1061,34 @@ export class CONNECTHandler {
         conversationData = JSON.parse(response.body);
       } catch {
         // Not JSON, forward as-is
-        console.log("[CONNECTHandler] Conversation response not JSON, forwarding without injection");
-        const responseStr = this.buildHTTPResponse(response.status, response.headers, response.body);
+        console.log(
+          "[CONNECTHandler] Conversation response not JSON, forwarding without injection"
+        );
+        const responseStr = this.buildHTTPResponse(
+          response.status,
+          response.headers,
+          response.body
+        );
         tlsSocket.write(responseStr);
         return;
       }
 
       // Debug: Log original server response structure
-      console.log(`[CONNECTHandler] 🔍 Original server response has ${conversationData.chat_messages?.length || 0} messages`);
+      console.log(
+        `[CONNECTHandler] 🔍 Original server response has ${conversationData.chat_messages?.length || 0} messages`
+      );
       if (conversationData.chat_messages?.[0]) {
         const serverMsg = conversationData.chat_messages[0] as Record<string, unknown>;
-        console.log(`[CONNECTHandler] 🔍 Server message keys: ${Object.keys(serverMsg).join(', ')}`);
+        console.log(
+          `[CONNECTHandler] 🔍 Server message keys: ${Object.keys(serverMsg).join(", ")}`
+        );
         // Save first server message to file for comparison
-        try {
-          const fs = require('fs');
-          fs.writeFileSync('/tmp/server_message_sample.json', JSON.stringify(serverMsg, null, 2));
-          console.log(`[CONNECTHandler] 🔍 Server message sample saved to /tmp/server_message_sample.json`);
-        } catch (e) { /* ignore */ }
+        const dumpPath = writeSensitiveDebugDump(
+          "conversation",
+          "server_message_sample.json",
+          JSON.stringify(serverMsg, null, 2)
+        );
+        if (dumpPath) console.log(`[CONNECTHandler] 🔍 Server message sample saved to ${dumpPath}`);
       }
 
       // Inject our messages into chat_messages array
@@ -1046,25 +1114,37 @@ export class CONNECTHandler {
       } else {
         // No chat_messages array, create one with our messages
         conversationData.chat_messages = [...injectedMsgs];
-        console.log(`[CONNECTHandler] 💉 Created chat_messages array with ${injectedMsgs.length} injected messages`);
+        console.log(
+          `[CONNECTHandler] 💉 Created chat_messages array with ${injectedMsgs.length} injected messages`
+        );
       }
 
       // CRITICAL: Set current_leaf_message_uuid to the last message
       // This tells Claude Desktop which message is the "current" state of the conversation
       if (conversationData.chat_messages && conversationData.chat_messages.length > 0) {
-        const lastMessage = conversationData.chat_messages[conversationData.chat_messages.length - 1];
+        const lastMessage =
+          conversationData.chat_messages[conversationData.chat_messages.length - 1];
         if (lastMessage?.uuid) {
           conversationData.current_leaf_message_uuid = lastMessage.uuid;
-          console.log(`[CONNECTHandler] 🔗 Set current_leaf_message_uuid to ${lastMessage.uuid.slice(0, 8)}`);
+          console.log(
+            `[CONNECTHandler] 🔗 Set current_leaf_message_uuid to ${lastMessage.uuid.slice(0, 8)}`
+          );
         }
       }
 
       // Debug: Save modified conversation response for analysis (AFTER injection)
       try {
-        const fs = require('fs');
-        fs.writeFileSync('/tmp/conversation_response_modified.json', JSON.stringify(conversationData, null, 2));
-        console.log(`[CONNECTHandler] 🔍 Modified conversation saved with ${conversationData.chat_messages?.length || 0} messages`);
-      } catch (e) { /* ignore */ }
+        writeSensitiveDebugDump(
+          "conversation",
+          "conversation_response_modified.json",
+          JSON.stringify(conversationData, null, 2)
+        );
+        console.log(
+          `[CONNECTHandler] 🔍 Modified conversation saved with ${conversationData.chat_messages?.length || 0} messages`
+        );
+      } catch (e) {
+        /* ignore */
+      }
 
       // Serialize the modified response
       const modifiedBody = JSON.stringify(conversationData);
@@ -1083,14 +1163,21 @@ export class CONNECTHandler {
 
       // Build and send response
       const responseStr = this.buildHTTPResponse(200, modifiedHeaders, modifiedBody);
-      console.log(`[CONNECTHandler] 📤 Sending modified sync response (${modifiedBody.length} bytes)`);
+      console.log(
+        `[CONNECTHandler] 📤 Sending modified sync response (${modifiedBody.length} bytes)`
+      );
 
       // Debug: Save exact HTTP response being sent
-      try {
-        const fs = require('fs');
-        fs.writeFileSync('/tmp/http_response_sent.txt', responseStr);
-        console.log(`[CONNECTHandler] 🔍 Full HTTP response saved to /tmp/http_response_sent.txt (${responseStr.length} total bytes)`);
-      } catch (e) { /* ignore */ }
+      const responseDump = writeSensitiveDebugDump(
+        "conversation",
+        "http_response_sent.txt",
+        responseStr
+      );
+      if (responseDump) {
+        console.log(
+          `[CONNECTHandler] 🔍 Full HTTP response saved to ${responseDump} (${responseStr.length} total bytes)`
+        );
+      }
 
       tlsSocket.write(responseStr);
 
@@ -1101,10 +1188,15 @@ export class CONNECTHandler {
       // Debug: Log first injected message structure
       if (conversationData.chat_messages?.[0]) {
         const firstMsg = conversationData.chat_messages[0];
-        console.log(`[CONNECTHandler] 🔍 First message structure: uuid=${firstMsg.uuid?.slice(0, 8)}, sender=${firstMsg.sender}, index=${firstMsg.index}, parent=${firstMsg.parent_message_uuid?.slice(0, 8)}`);
+        console.log(
+          `[CONNECTHandler] 🔍 First message structure: uuid=${firstMsg.uuid?.slice(0, 8)}, sender=${firstMsg.sender}, index=${firstMsg.index}, parent=${firstMsg.parent_message_uuid?.slice(0, 8)}`
+        );
       }
     } catch (err) {
-      console.error("[CONNECTHandler] Message injection failed, falling back to normal forward:", err);
+      console.error(
+        "[CONNECTHandler] Message injection failed, falling back to normal forward:",
+        err
+      );
       // Fallback to normal CycleTLS forward
       await this.forwardViaCycleTLS(parsedRequest, tlsSocket, targetHost);
     }
@@ -1113,11 +1205,7 @@ export class CONNECTHandler {
   /**
    * Build HTTP response string from status, headers, and body
    */
-  private buildHTTPResponse(
-    status: number,
-    headers: Record<string, string>,
-    body: string
-  ): string {
+  private buildHTTPResponse(status: number, headers: Record<string, string>, body: string): string {
     const statusText = status === 200 ? "OK" : status === 404 ? "Not Found" : "Error";
     let response = `HTTP/1.1 ${status} ${statusText}\r\n`;
 
@@ -1150,21 +1238,25 @@ export class CONNECTHandler {
       // Build full URL
       const url = `https://${targetHost}${parsedRequest.path}`;
 
-      console.log(`[CONNECTHandler] 🚀 Forwarding via CycleTLS: ${parsedRequest.method} ${parsedRequest.path}`);
+      console.log(
+        `[CONNECTHandler] 🚀 Forwarding via CycleTLS: ${parsedRequest.method} ${parsedRequest.path}`
+      );
 
       // Debug: log POST body
       if (parsedRequest.method === "POST") {
-        console.log(`[CONNECTHandler] POST body (${parsedRequest.body.length} bytes): ${parsedRequest.body.toString("utf8").substring(0, 200)}`);
+        console.log(
+          `[CONNECTHandler] POST body (${parsedRequest.body.length} bytes): ${parsedRequest.body.toString("utf8").substring(0, 200)}`
+        );
       }
 
       // Remove headers that CycleTLS manages or that could cause issues
       const headersWithoutCompression: Record<string, string> = {};
       const skipHeaders = new Set([
-        'accept-encoding',  // CycleTLS handles decompression
-        'user-agent',       // CycleTLS sets Chrome User-Agent
-        'connection',       // CycleTLS manages connections
-        'host',             // CycleTLS derives from URL
-        'content-length',   // CycleTLS computes from body
+        "accept-encoding", // CycleTLS handles decompression
+        "user-agent", // CycleTLS sets Chrome User-Agent
+        "connection", // CycleTLS manages connections
+        "host", // CycleTLS derives from URL
+        "content-length", // CycleTLS computes from body
       ]);
       for (const [key, value] of Object.entries(parsedRequest.headers)) {
         const lowerKey = key.toLowerCase();
@@ -1176,8 +1268,12 @@ export class CONNECTHandler {
 
       // Ensure Content-Type is set for POST requests with JSON body
       if (parsedRequest.method === "POST") {
-        const hasContentType = Object.keys(headersWithoutCompression).some(k => k.toLowerCase() === "content-type");
-        console.log(`[CONNECTHandler] POST check: hasContentType=${hasContentType}, keys=${Object.keys(headersWithoutCompression).join(",")}`);
+        const hasContentType = Object.keys(headersWithoutCompression).some(
+          (k) => k.toLowerCase() === "content-type"
+        );
+        console.log(
+          `[CONNECTHandler] POST check: hasContentType=${hasContentType}, keys=${Object.keys(headersWithoutCompression).join(",")}`
+        );
         if (!hasContentType) {
           const bodyStr = parsedRequest.body.toString("utf8").trim();
           if (bodyStr.startsWith("{") || bodyStr.startsWith("[")) {
@@ -1189,7 +1285,9 @@ export class CONNECTHandler {
 
       // Debug: log headers being sent
       if (parsedRequest.method === "POST") {
-        console.log(`[CONNECTHandler] Headers for POST: ${JSON.stringify(headersWithoutCompression).substring(0, 500)}`);
+        console.log(
+          `[CONNECTHandler] Headers for POST: ${JSON.stringify(headersWithoutCompression).substring(0, 500)}`
+        );
       }
 
       // Make request via CycleTLS
@@ -1205,9 +1303,16 @@ export class CONNECTHandler {
       if (parsedRequest.path.includes("_rsc=") && response.body) {
         const convMatch = parsedRequest.path.match(/\/chat\/([a-f0-9-]+)/);
         const convId = convMatch?.[1]?.slice(0, 8) || "unknown";
-        const filename = `/tmp/rsc_${convId}_${Date.now()}.txt`;
-        fs.writeFileSync(filename, response.body);
-        console.log(`[CONNECTHandler] 📄 Saved RSC response to ${filename} (${response.body.length} bytes)`);
+        const filename = writeSensitiveDebugDump(
+          "rsc",
+          `${convId}_${Date.now()}.txt`,
+          response.body
+        );
+        if (filename) {
+          console.log(
+            `[CONNECTHandler] 📄 Saved RSC response to ${filename} (${response.body.length} bytes)`
+          );
+        }
       }
 
       // Build HTTP response
@@ -1217,11 +1322,11 @@ export class CONNECTHandler {
       // Build headers - CycleTLS returns arrays, flatten them
       // Skip Content-Encoding since CycleTLS already decompresses the body
       const headers = Object.entries(response.headers)
-        .filter(([k]) => k.toLowerCase() !== 'content-encoding')
+        .filter(([k]) => k.toLowerCase() !== "content-encoding")
         .map(([k, v]) => {
           // CycleTLS returns header values as arrays - take first value
           const value = Array.isArray(v) ? v[0] : String(v);
-          const sanitized = value.replace(/[\r\n]/g, '');
+          const sanitized = value.replace(/[\r\n]/g, "");
           return `${k}: ${sanitized}`;
         })
         .join("\r\n");
@@ -1319,7 +1424,9 @@ export class CONNECTHandler {
 
           // Log WebSocket upgrade responses (101)
           if (isWebSocket || data.toString("utf8", 0, 30).includes("101")) {
-            console.log(`[CONNECTHandler] 📥 Server response (${data.length} bytes, isWS=${isWebSocket})`);
+            console.log(
+              `[CONNECTHandler] 📥 Server response (${data.length} bytes, isWS=${isWebSocket})`
+            );
           }
 
           // Capture response for specific endpoints
@@ -1354,8 +1461,10 @@ export class CONNECTHandler {
               if (parsed.statusCode === 403) {
                 console.log(`[CONNECTHandler] ⚠️ 403 Response detected!`);
                 const headerStr = data.toString("utf8", 0, Math.min(2000, data.length));
-                console.log(`[CONNECTHandler] Response headers:\n${headerStr.split('\r\n\r\n')[0]}`);
-                const bodyStart = headerStr.indexOf('\r\n\r\n');
+                console.log(
+                  `[CONNECTHandler] Response headers:\n${headerStr.split("\r\n\r\n")[0]}`
+                );
+                const bodyStart = headerStr.indexOf("\r\n\r\n");
                 if (bodyStart > 0) {
                   const body = headerStr.slice(bodyStart + 4, bodyStart + 504);
                   console.log(`[CONNECTHandler] Response body preview:\n${body}`);
@@ -1419,7 +1528,9 @@ export class CONNECTHandler {
         // Debug: Log parsing state for large requests
         const parserState = parser.getState();
         if (parserState.method === "POST" || data.length > 1000) {
-          console.log(`[CONNECTHandler] 📦 Data chunk: ${data.length} bytes, method=${parserState.method || 'unknown'}, isComplete=${parser.isComplete()}, contentLength=${parserState.contentLength}, received=${parserState.bodyReceived}`);
+          console.log(
+            `[CONNECTHandler] 📦 Data chunk: ${data.length} bytes, method=${parserState.method || "unknown"}, isComplete=${parser.isComplete()}, contentLength=${parserState.contentLength}, received=${parserState.bodyReceived}`
+          );
         }
 
         // Check if we have a complete request
@@ -1453,8 +1564,12 @@ export class CONNECTHandler {
             const upgradeHeader = parsedRequest.headers["upgrade"]?.toLowerCase();
             const isWebSocketRequest = upgradeHeader === "websocket";
             if (isWebSocketRequest) {
-              console.log(`[CONNECTHandler] 🔌 WebSocket upgrade detected for ${parsedRequest.path}`);
-              console.log(`[CONNECTHandler] 📤 Forwarding WS upgrade request (${parsedRequest.raw.length} bytes)`);
+              console.log(
+                `[CONNECTHandler] 🔌 WebSocket upgrade detected for ${parsedRequest.path}`
+              );
+              console.log(
+                `[CONNECTHandler] 📤 Forwarding WS upgrade request (${parsedRequest.raw.length} bytes)`
+              );
               isWebSocket = true; // Switch to passthrough mode after this request
             }
 
@@ -1472,7 +1587,9 @@ export class CONNECTHandler {
                 `[CONNECTHandler] ${parsedRequest.method} ${preview}${currentModel ? ` [${currentModel}]` : ""}${isWebSocketRequest ? " [WS]" : ""}${isCompletion ? " [COMPLETION]" : ""}`
               );
               if (isCompletion) {
-                console.log(`[CONNECTHandler] 🎯 Completion request detected! Body length: ${parsedRequest.body.length}`);
+                console.log(
+                  `[CONNECTHandler] 🎯 Completion request detected! Body length: ${parsedRequest.body.length}`
+                );
               }
             }
 
@@ -1526,13 +1643,21 @@ export class CONNECTHandler {
                   console.log(
                     `[CONNECTHandler] 🔄 Intercepting conversation sync for ${currentConversationId.slice(0, 8)} (has ${this.injectedMessages.get(currentConversationId)?.length || 0} injected messages)`
                   );
-                  await this.forwardWithMessageInjection(parsedRequest, tlsSocket, targetHost, currentConversationId);
+                  await this.forwardWithMessageInjection(
+                    parsedRequest,
+                    tlsSocket,
+                    targetHost,
+                    currentConversationId
+                  );
                 } else if (this.cycleTLSManager) {
                   // Use CycleTLS for non-streaming claude.ai requests to bypass Cloudflare
                   try {
                     await this.forwardViaCycleTLS(parsedRequest, tlsSocket, targetHost);
                   } catch (err) {
-                    console.error("[CONNECTHandler] CycleTLS forward failed, trying native TLS:", err);
+                    console.error(
+                      "[CONNECTHandler] CycleTLS forward failed, trying native TLS:",
+                      err
+                    );
                     // Fallback to native TLS with modified headers
                     await this.forwardViaNativeTLS(parsedRequest, tlsSocket, targetHost);
                   }
@@ -1543,12 +1668,19 @@ export class CONNECTHandler {
                 }
               } else if (targetHost.includes("anthropic.com")) {
                 // Handle anthropic.com hosts (like a-api.anthropic.com)
-                console.log(`[CONNECTHandler] 📡 Anthropic API: ${parsedRequest.method} ${parsedRequest.path}`);
+                console.log(
+                  `[CONNECTHandler] 📡 Anthropic API: ${parsedRequest.method} ${parsedRequest.path}`
+                );
                 if (parsedRequest.body.length > 0) {
-                  console.log(`[CONNECTHandler] Anthropic API body (${parsedRequest.body.length} bytes): ${parsedRequest.body.toString("utf8").substring(0, 300)}`);
+                  console.log(
+                    `[CONNECTHandler] Anthropic API body (${parsedRequest.body.length} bytes): ${parsedRequest.body.toString("utf8").substring(0, 300)}`
+                  );
                 }
                 // Check if this might be a messages/completion endpoint
-                if (parsedRequest.path.includes("/messages") || parsedRequest.path.includes("/v1/m")) {
+                if (
+                  parsedRequest.path.includes("/messages") ||
+                  parsedRequest.path.includes("/v1/m")
+                ) {
                   console.log(`[CONNECTHandler] 🎯 Potential completion endpoint detected!`);
                 }
                 const conn = ensureServerConnection();
@@ -1687,27 +1819,38 @@ export class CONNECTHandler {
       this.saveCompletionRequestDebug(claudeDesktopRequest, parsedRequest.path, conversationId);
 
       // Transform to Anthropic API format (include conversation history for context)
-      const anthropicRequest = this.transformToAnthropicFormat(claudeDesktopRequest, targetModel, conversationId);
+      const anthropicRequest = this.transformToAnthropicFormat(
+        claudeDesktopRequest,
+        targetModel,
+        conversationId
+      );
 
-      // Save transformed request for debugging
       const timestamp = Date.now();
-      const filename = `/tmp/transformed_${conversationId?.slice(0, 8) || "unknown"}_${timestamp}.json`;
-      fs.writeFileSync(filename, JSON.stringify(anthropicRequest, null, 2));
-      console.log(`[CONNECTHandler] Saved transformed request to ${filename}`);
+      const filename = writeSensitiveDebugDump(
+        "transformed",
+        `${conversationId?.slice(0, 8) || "unknown"}_${timestamp}.json`,
+        JSON.stringify(anthropicRequest, null, 2)
+      );
+      if (filename) console.log(`[CONNECTHandler] Saved transformed request to ${filename}`);
 
       // Call provider API
       const response = await this.callProviderAPI(targetModel, anthropicRequest);
 
       // Transform and stream response back to client, passing conversation ID for sync support
-      await this.streamTransformedResponse(tlsSocket, response, targetModel, claudeDesktopRequest, conversationId);
+      await this.streamTransformedResponse(
+        tlsSocket,
+        response,
+        targetModel,
+        claudeDesktopRequest,
+        conversationId
+      );
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error("[CONNECTHandler] Interception failed:", errorMsg);
 
-      // Log error
-      const logFilename = `/tmp/fallback_${Date.now()}.json`;
-      fs.writeFileSync(
-        logFilename,
+      writeSensitiveDebugDump(
+        "fallback",
+        `${Date.now()}.json`,
         JSON.stringify(
           {
             timestamp: new Date().toISOString(),
@@ -1746,7 +1889,11 @@ export class CONNECTHandler {
 
     const msgId = `error_${Date.now().toString(36)}`;
     const msgUuid = crypto.randomUUID();
-    const traceId = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join("");
+    const traceId = Array.from({ length: 16 }, () =>
+      Math.floor(Math.random() * 256)
+        .toString(16)
+        .padStart(2, "0")
+    ).join("");
 
     // Helper to write SSE event
     const writeEvent = (event: string, data: unknown) => {
@@ -1756,7 +1903,8 @@ export class CONNECTHandler {
     };
 
     // Format error message for display
-    const errorText = `⚠️ **Claudish Proxy Error**\n\n` +
+    const errorText =
+      `⚠️ **Claudish Proxy Error**\n\n` +
       `Failed to route request to **${targetModel}**:\n\n` +
       `\`\`\`\n${errorMsg}\n\`\`\`\n\n` +
       `_Check your API key and model configuration in ClaudishProxy settings._`;
@@ -1833,9 +1981,12 @@ export class CONNECTHandler {
     try {
       const timestamp = Date.now();
       const pathSlug = path.includes("/completion") ? "completion" : "request";
-      const filename = `/tmp/${pathSlug}_${conversationId?.slice(0, 8) || "unknown"}_${timestamp}.json`;
-      fs.writeFileSync(filename, JSON.stringify(request, null, 2));
-      console.log(`[CONNECTHandler] Saved completion request to ${filename}`);
+      const filename = writeSensitiveDebugDump(
+        pathSlug,
+        `${conversationId?.slice(0, 8) || "unknown"}_${timestamp}.json`,
+        JSON.stringify(request, null, 2)
+      );
+      if (filename) console.log(`[CONNECTHandler] Saved completion request to ${filename}`);
     } catch (err) {
       console.error("[CONNECTHandler] Error saving completion request:", err);
     }
@@ -1957,7 +2108,11 @@ export class CONNECTHandler {
     const msgId = `chatcompl_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
     const msgUuid = crypto.randomUUID();
     // Generate trace ID without using crypto.randomBytes (not available in Bun)
-    const traceId = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join("");
+    const traceId = Array.from({ length: 16 }, () =>
+      Math.floor(Math.random() * 256)
+        .toString(16)
+        .padStart(2, "0")
+    ).join("");
     const requestId = `req_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
     const parentUuid = originalRequest?.parent_message_uuid || crypto.randomUUID();
 
@@ -2178,7 +2333,9 @@ export class CONNECTHandler {
       tlsSocket.write("0\r\n\r\n");
 
       // Store messages for sync support (so conversation GET requests return our injected messages)
-      console.log(`[CONNECTHandler] 📊 Storage check: convId=${!!conversationId}, prompt=${!!originalRequest?.prompt}, responseLen=${fullResponseText.length}`);
+      console.log(
+        `[CONNECTHandler] 📊 Storage check: convId=${!!conversationId}, prompt=${!!originalRequest?.prompt}, responseLen=${fullResponseText.length}`
+      );
       if (conversationId && originalRequest?.prompt && fullResponseText) {
         const now = new Date().toISOString();
         const responseEndTime = now;
@@ -2191,12 +2348,10 @@ export class CONNECTHandler {
 
         // For parent chain: if we have previous messages, use the last assistant's UUID
         // Otherwise use the parentUuid from the request (root UUID for first message)
-        const prevAssistantMsg = existingMessages.length > 0
-          ? existingMessages[existingMessages.length - 1]
-          : null;
-        const actualParentUuid = prevAssistantMsg?.sender === "assistant"
-          ? prevAssistantMsg.uuid
-          : parentUuid;
+        const prevAssistantMsg =
+          existingMessages.length > 0 ? existingMessages[existingMessages.length - 1] : null;
+        const actualParentUuid =
+          prevAssistantMsg?.sender === "assistant" ? prevAssistantMsg.uuid : parentUuid;
 
         // Create user message
         const userMessage = {
@@ -2257,32 +2412,37 @@ export class CONNECTHandler {
         );
 
         // Debug: Save injected message sample for comparison
-        try {
-          const fs = require('fs');
-          fs.writeFileSync('/tmp/injected_message_sample.json', JSON.stringify(assistantMessage, null, 2));
-          console.log(`[CONNECTHandler] 🔍 Injected message sample saved to /tmp/injected_message_sample.json`);
-        } catch (e) { /* ignore */ }
+        const dumpPath = writeSensitiveDebugDump(
+          "conversation",
+          "injected_message_sample.json",
+          JSON.stringify(assistantMessage, null, 2)
+        );
+        if (dumpPath)
+          console.log(`[CONNECTHandler] 🔍 Injected message sample saved to ${dumpPath}`);
       }
 
       console.log(
         `[CONNECTHandler] ✅ Interception complete. Tokens: in=${usage?.prompt_tokens || 0}, out=${usage?.completion_tokens || 0}`
       );
 
-      // Write success log for debugging
-      const successFilename = `/tmp/success_${conversationId?.slice(0, 8) || "unknown"}_${Date.now()}.json`;
-      fs.writeFileSync(
-        successFilename,
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          targetModel,
-          conversationId,
-          responseLength: fullResponseText.length,
-          promptTokens: usage?.prompt_tokens || 0,
-          completionTokens: usage?.completion_tokens || 0,
-          responsePreview: fullResponseText.slice(0, 200),
-        }, null, 2)
+      const successFilename = writeSensitiveDebugDump(
+        "success",
+        `${conversationId?.slice(0, 8) || "unknown"}_${Date.now()}.json`,
+        JSON.stringify(
+          {
+            timestamp: new Date().toISOString(),
+            targetModel,
+            conversationId,
+            responseLength: fullResponseText.length,
+            promptTokens: usage?.prompt_tokens || 0,
+            completionTokens: usage?.completion_tokens || 0,
+            responsePreview: fullResponseText.slice(0, 200),
+          },
+          null,
+          2
+        )
       );
-      console.log(`[CONNECTHandler] 📝 Success logged to ${successFilename}`);
+      if (successFilename) console.log(`[CONNECTHandler] 📝 Success logged to ${successFilename}`);
 
       // Add to log buffer for stats
       const logEntry: LogEntry = {

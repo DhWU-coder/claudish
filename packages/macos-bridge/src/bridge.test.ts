@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,6 +69,32 @@ describe("Authentication", () => {
       },
     });
     expect(response.status).toBe(200);
+  });
+});
+
+describe("Debug Endpoint", () => {
+  test("requires authentication", async () => {
+    const response = await fetch(`${BASE_URL}:${serverPort}/debug/state`);
+    expect(response.status).toBe(401);
+  });
+
+  test("returns sanitized state with valid auth", async () => {
+    const response = await fetch(`${BASE_URL}:${serverPort}/debug/state`, {
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as Record<string, unknown>;
+    expect(data).not.toHaveProperty("config");
+    expect(data).toHaveProperty("proxyEnabled");
+    expect(data).toHaveProperty("routingEnabled");
+  });
+
+  test("writes bridge token file with owner-only permissions", () => {
+    const tokenPath = path.join(os.homedir(), ".claudish-proxy", "bridge-token");
+    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
   });
 });
 

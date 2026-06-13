@@ -8,9 +8,47 @@
  * These tests validate behavior described in requirements, not implementation details.
  */
 
-import { test, expect, describe } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "./cli.js";
+import { saveConfig } from "./profile-config.js";
 import type { ClaudishConfig } from "./types.js";
+
+const originalClaudishModel = process.env.CLAUDISH_MODEL;
+const originalAnthropicModel = process.env.ANTHROPIC_MODEL;
+const originalClaudishHome = process.env.CLAUDISH_HOME;
+let tempHome: string | undefined;
+
+beforeEach(() => {
+  tempHome = mkdtempSync(join(tmpdir(), "claudish-default-model-"));
+  process.env.CLAUDISH_HOME = join(tempHome, ".claudish");
+  process.env.CLAUDISH_MODEL = undefined;
+  process.env.ANTHROPIC_MODEL = undefined;
+});
+
+afterEach(() => {
+  if (originalClaudishModel === undefined) {
+    process.env.CLAUDISH_MODEL = undefined;
+  } else {
+    process.env.CLAUDISH_MODEL = originalClaudishModel;
+  }
+  if (originalAnthropicModel === undefined) {
+    process.env.ANTHROPIC_MODEL = undefined;
+  } else {
+    process.env.ANTHROPIC_MODEL = originalAnthropicModel;
+  }
+  if (originalClaudishHome === undefined) {
+    process.env.CLAUDISH_HOME = undefined;
+  } else {
+    process.env.CLAUDISH_HOME = originalClaudishHome;
+  }
+  if (tempHome) {
+    rmSync(tempHome, { recursive: true, force: true });
+    tempHome = undefined;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Group 1: Backward Compatibility (existing behavior preserved)
@@ -42,6 +80,50 @@ describe("Group 1: Backward compatibility", () => {
     const config = await parseArgs(["--model", "grok", "--debug"]);
     expect(config.model).toBe("grok");
     expect(config.debug).toBe(true);
+  });
+});
+
+describe("Default model config", () => {
+  test("uses defaultModel from config when no model env or CLI flag is set", async () => {
+    saveConfig({
+      version: "1.0.0",
+      defaultProfile: "default",
+      profiles: {},
+      defaultModel: "cx@gpt-5.5",
+    });
+
+    const config = await parseArgs(["hello"]);
+
+    expect(config.model).toBe("cx@gpt-5.5");
+    expect(config.claudeArgs).toEqual(["hello"]);
+  });
+
+  test("CLI --model wins over CLAUDISH_MODEL and config defaultModel", async () => {
+    saveConfig({
+      version: "1.0.0",
+      defaultProfile: "default",
+      profiles: {},
+      defaultModel: "cx@gpt-5.5",
+    });
+    process.env.CLAUDISH_MODEL = "env-model";
+
+    const config = await parseArgs(["--model", "cli-model", "hello"]);
+
+    expect(config.model).toBe("cli-model");
+  });
+
+  test("CLAUDISH_MODEL wins over config defaultModel", async () => {
+    saveConfig({
+      version: "1.0.0",
+      defaultProfile: "default",
+      profiles: {},
+      defaultModel: "cx@gpt-5.5",
+    });
+    process.env.CLAUDISH_MODEL = "env-model";
+
+    const config = await parseArgs(["hello"]);
+
+    expect(config.model).toBe("env-model");
   });
 });
 
@@ -260,8 +342,10 @@ describe("Regression: -p flag is not consumed by claudish (#76)", () => {
 describe("Interactive mode detection with flag-only args", () => {
   test("flags with values but no prompt → interactive", async () => {
     const config = await parseArgs([
-      "--model", "grok",
-      "--session-id", "abc-123",
+      "--model",
+      "grok",
+      "--session-id",
+      "abc-123",
       "--dangerously-skip-permissions",
     ]);
     expect(config.interactive).toBe(true);

@@ -32,8 +32,22 @@ import type { FallbackCandidate } from "./handlers/fallback-handler.js";
 import { wrapAnthropicError } from "./handlers/shared/anthropic-error.js";
 import { route, loadRoutingRules } from "./providers/routing-rules.js";
 import { createHandlerForProvider } from "./providers/provider-profiles.js";
-import { loadCustomEndpoints } from "./providers/custom-endpoints-loader.js";
+import {
+  loadCustomEndpoints,
+  resolveCustomEndpointDefaultModel,
+} from "./providers/custom-endpoints-loader.js";
 import { loadConfig } from "./profile-config.js";
+
+export function isAllowedProxyOrigin(origin?: string): boolean {
+  if (!origin) return true;
+
+  try {
+    const url = new URL(origin);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
 
 export interface ProxyServerOptions {
   summarizeTools?: boolean; // Summarize tool descriptions for local models
@@ -55,26 +69,29 @@ export async function createProxyServer(
   // Load user-declared custom endpoints from ~/.claudish/config.json and
   // register them in the runtime provider registry so they appear in lookups
   // and handler creation. Runs once per proxy lifetime; idempotent.
+  const claudishConfig = loadConfig();
   try {
-    const customEpResult = loadCustomEndpoints(loadConfig());
+    const customEpResult = loadCustomEndpoints(claudishConfig);
     if (customEpResult.registered > 0) {
-      log(
-        `[Proxy] Registered ${customEpResult.registered} custom endpoint(s) from config`
-      );
+      log(`[Proxy] Registered ${customEpResult.registered} custom endpoint(s) from config`);
     }
     for (const err of customEpResult.errors) {
-      console.error(
-        `[claudish] customEndpoints['${err.name}'] failed validation: ${err.message}`
-      );
+      console.error(`[claudish] customEndpoints['${err.name}'] failed validation: ${err.message}`);
     }
   } catch (err) {
     // Config read failure should not crash the proxy — the rest of startup
     // continues and users get the default (builtin-only) set of providers.
-    log(`[Proxy] customEndpoints load skipped: ${err instanceof Error ? err.message : String(err)}`);
+    log(
+      `[Proxy] customEndpoints load skipped: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 
   // Define handlers for different roles
-  const nativeHandler = new NativeHandler(anthropicApiKey, options.advisorModels, options.advisorCollector);
+  const nativeHandler = new NativeHandler(
+    anthropicApiKey,
+    options.advisorModels,
+    options.advisorCollector
+  );
   const openRouterHandlers = new Map<string, ModelHandler>(); // Map from Target Model ID -> OpenRouter Handler
   const localProviderHandlers = new Map<string, ModelHandler>(); // Map from Target Model ID -> Local Provider Handler
   const remoteProviderHandlers = new Map<string, ModelHandler>(); // Map from Target Model ID -> Gemini/OpenAI Handler
@@ -337,6 +354,8 @@ export async function createProxyServer(
       target = model;
     }
 
+    target = resolveCustomEndpointDefaultModel(target, claudishConfig);
+
     const invocationMode = detectInvocationMode(target, wasFromModelMap);
 
     // 2b. Catalog resolution — resolve vendor prefix for OpenRouter.
@@ -457,7 +476,12 @@ export async function createProxyServer(
   };
 
   const app = new Hono();
-  app.use("*", cors());
+  app.use(
+    "*",
+    cors({
+      origin: (origin) => (isAllowedProxyOrigin(origin) ? origin : null),
+    })
+  );
 
   app.get("/", (c) =>
     c.json({
@@ -473,10 +497,7 @@ export async function createProxyServer(
     try {
       const body = await c.req.json();
       if (typeof body?.model !== "string" || body.model.length === 0) {
-        return c.json(
-          wrapAnthropicError(400, "missing required field: model"),
-          400
-        );
+        return c.json(wrapAnthropicError(400, "missing required field: model"), 400);
       }
       const handler = await getHandlerForRequest(body.model);
 

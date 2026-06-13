@@ -672,6 +672,9 @@ function showCurrentConfig(): void {
   console.log(`${DIM}~/.claudish/config.json${RESET}\n`);
 
   // Default profile
+  console.log(
+    `${BOLD}Default Model:${RESET} ${config.defaultModel ? `${CYAN}${config.defaultModel}${RESET}` : `${DIM}not set${RESET}`}`
+  );
   console.log(`${BOLD}Default Profile:${RESET} ${CYAN}${config.defaultProfile}${RESET}`);
   const profileCount = Object.keys(config.profiles).length;
   console.log(

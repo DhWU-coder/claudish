@@ -9,14 +9,20 @@
  * Resolution order: local config takes priority over global config.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Config directory and file paths
-const CONFIG_DIR = join(homedir(), ".claudish");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const LOCAL_CONFIG_FILENAME = ".claudish.json";
+
+function getGlobalConfigDir(): string {
+  return process.env.CLAUDISH_HOME || join(homedir(), ".claudish");
+}
+
+function getGlobalConfigFile(): string {
+  return join(getGlobalConfigDir(), "config.json");
+}
 
 export type ProfileScope = "local" | "global";
 
@@ -125,6 +131,8 @@ export interface ClaudishProfileConfig {
   autoApproveConfirmedAt?: string;
   /** Diagnostic output mode: auto (default), logfile, off */
   diagMode?: "auto" | "logfile" | "off";
+  /** Default model used when --model and model env vars are not set. */
+  defaultModel?: string;
 
   /**
    * Default provider for bare model names. One of the builtin names
@@ -167,9 +175,21 @@ const DEFAULT_CONFIG: ClaudishProfileConfig = {
  * Ensure global config directory exists
  */
 function ensureConfigDir(): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+  const configDir = getGlobalConfigDir();
+  if (!existsSync(configDir)) {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
+  chmodSync(configDir, 0o700);
+}
+
+export function saveJsonSecure(filePath: string, data: unknown): void {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  chmodSync(dir, 0o700);
+  writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+  chmodSync(filePath, 0o600);
 }
 
 /**
@@ -178,13 +198,14 @@ function ensureConfigDir(): void {
  */
 export function loadConfig(): ClaudishProfileConfig {
   ensureConfigDir();
+  const configFile = getGlobalConfigFile();
 
-  if (!existsSync(CONFIG_FILE)) {
+  if (!existsSync(configFile)) {
     return { ...DEFAULT_CONFIG };
   }
 
   try {
-    const content = readFileSync(CONFIG_FILE, "utf-8");
+    const content = readFileSync(configFile, "utf-8");
     const config = JSON.parse(content) as ClaudishProfileConfig;
 
     // Validate and merge with defaults
@@ -217,6 +238,9 @@ export function loadConfig(): ClaudishProfileConfig {
     if (config.defaultProvider !== undefined) {
       merged.defaultProvider = config.defaultProvider;
     }
+    if (config.defaultModel !== undefined) {
+      merged.defaultModel = config.defaultModel;
+    }
     if (config.customEndpoints !== undefined) {
       merged.customEndpoints = config.customEndpoints;
     }
@@ -232,21 +256,27 @@ export function loadConfig(): ClaudishProfileConfig {
  */
 export function saveConfig(config: ClaudishProfileConfig): void {
   ensureConfigDir();
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+  saveJsonSecure(getGlobalConfigFile(), config);
 }
 
 /**
  * Check if global config file exists
  */
 export function configExists(): boolean {
-  return existsSync(CONFIG_FILE);
+  return existsSync(getGlobalConfigFile());
 }
 
 /**
  * Get global config file path
  */
 export function getConfigPath(): string {
-  return CONFIG_FILE;
+  return getGlobalConfigFile();
+}
+
+export function setDefaultModel(model: string): void {
+  const config = loadConfig();
+  config.defaultModel = model;
+  saveConfig(config);
 }
 
 // ─── Local Config ────────────────────────────────────────

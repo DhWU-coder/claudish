@@ -201,6 +201,19 @@ function createTempSettingsFile(
   return { path: tempPath, statusLine };
 }
 
+function mergeEnvIntoSettingsFile(tempSettingsPath: string, env: Record<string, string>): void {
+  try {
+    const settings = JSON.parse(readFileSync(tempSettingsPath, "utf-8"));
+    settings.env = {
+      ...(settings.env || {}),
+      ...env,
+    };
+    writeFileSync(tempSettingsPath, JSON.stringify(settings, null, 2), "utf-8");
+  } catch {
+    // If temp settings cannot be updated, let Claude Code fail with its native error.
+  }
+}
+
 /**
  * If the user passed --settings in claudeArgs, read their settings file,
  * inject the claudish statusLine into it, write a merged file, and remove
@@ -376,15 +389,22 @@ export async function runClaudeWithProxy(
       // credentials. Don't set placeholders, but preserve any real keys the user has.
     } else {
       // Pure alternative mode: all models go through proxy providers
-      // Use placeholder to prevent Claude Code login dialog
+      // Use a fixed placeholder to prevent Claude Code's login dialog.
+      // Never inherit ANTHROPIC_API_KEY here: users often set it with a
+      // third-party ANTHROPIC_BASE_URL in ~/.claude/settings.json or shell env,
+      // and proxy-backed providers must ignore that global Anthropic wiring.
       env.ANTHROPIC_API_KEY =
-        process.env.ANTHROPIC_API_KEY ||
         "sk-ant-api03-placeholder-not-used-proxy-handles-auth-with-openrouter-key-xxxxxxxxxxxxxxxxxxxxx";
 
-      // Also set ANTHROPIC_AUTH_TOKEN to bypass login screen
-      // Claude Code checks both API_KEY and AUTH_TOKEN for authentication
-      env.ANTHROPIC_AUTH_TOKEN =
-        process.env.ANTHROPIC_AUTH_TOKEN || "placeholder-token-not-used-proxy-handles-auth";
+      // Do not pass subscription auth tokens for proxy-backed providers.
+      // Newer Claude Code prefers ANTHROPIC_AUTH_TOKEN over ANTHROPIC_BASE_URL
+      // and will bypass the local proxy, producing native subscription errors.
+      delete env.ANTHROPIC_AUTH_TOKEN;
+
+      mergeEnvIntoSettingsFile(tempSettingsPath, {
+        ANTHROPIC_BASE_URL: proxyUrl,
+        ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+      });
     }
   }
 

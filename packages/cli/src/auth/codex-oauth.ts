@@ -14,7 +14,15 @@
 
 import { exec } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +39,7 @@ export interface CodexCredentials {
   refresh_token: string;
   expires_at: number; // Unix timestamp (ms)
   account_id?: string; // Extracted from id_token JWT claims (chatgpt_account_id)
+  id_token?: string;
 }
 
 /**
@@ -51,12 +60,7 @@ const OAUTH_CONFIG = {
   clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
   authUrl: "https://auth.openai.com/oauth/authorize",
   tokenUrl: "https://auth.openai.com/oauth/token",
-  scopes: [
-    "openid",
-    "profile",
-    "email",
-    "offline_access",
-  ],
+  scopes: ["openid", "profile", "email", "offline_access"],
 };
 
 /**
@@ -99,8 +103,15 @@ export class CodexOAuth {
    * Get credentials file path
    */
   private getCredentialsPath(): string {
-    const claudishDir = join(homedir(), ".claudish");
+    const claudishDir = process.env.CLAUDISH_HOME || join(homedir(), ".claudish");
     return join(claudishDir, "codex-oauth.json");
+  }
+
+  private getCodexCliCredentialsPath(): string {
+    if (process.env.CODEX_HOME) {
+      return join(process.env.CODEX_HOME, "auth.json");
+    }
+    return join(homedir(), ".codex", "auth.json");
   }
 
   /**
@@ -126,8 +137,8 @@ export class CodexOAuth {
     // Exchange auth code for tokens
     const tokens = await this.exchangeCodeForTokens(authCode, codeVerifier, redirectUri);
 
-    // Extract account_id from id_token JWT (if present)
-    const accountId = tokens.id_token ? this.extractAccountId(tokens.id_token) : undefined;
+    const accountId =
+      this.extractAccountId(tokens.access_token) ?? this.extractAccountId(tokens.id_token);
 
     // Save credentials
     const credentials: CodexCredentials = {
@@ -135,6 +146,7 @@ export class CodexOAuth {
       refresh_token: tokens.refresh_token!,
       expires_at: Date.now() + tokens.expires_in * 1000,
       account_id: accountId,
+      id_token: tokens.id_token,
     };
 
     this.saveCredentials(credentials);
@@ -238,9 +250,9 @@ export class CodexOAuth {
       const response = await fetch(OAUTH_CONFIG.tokenUrl, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: JSON.stringify({
+        body: new URLSearchParams({
           grant_type: "refresh_token",
           refresh_token: this.credentials.refresh_token,
           client_id: OAUTH_CONFIG.clientId,
@@ -254,10 +266,10 @@ export class CodexOAuth {
 
       const tokens = (await response.json()) as TokenResponse;
 
-      // Extract account_id from refreshed id_token if present
-      const accountId = tokens.id_token
-        ? this.extractAccountId(tokens.id_token)
-        : this.credentials.account_id;
+      const accountId =
+        this.extractAccountId(tokens.access_token) ??
+        this.extractAccountId(tokens.id_token) ??
+        this.credentials.account_id;
 
       // Update credentials (keep existing refresh token if new one not provided)
       const updatedCredentials: CodexCredentials = {
@@ -265,6 +277,7 @@ export class CodexOAuth {
         refresh_token: tokens.refresh_token || this.credentials.refresh_token,
         expires_at: Date.now() + tokens.expires_in * 1000,
         account_id: accountId,
+        id_token: tokens.id_token || this.credentials.id_token,
       };
 
       this.saveCredentials(updatedCredentials);
@@ -290,15 +303,15 @@ export class CodexOAuth {
     const credPath = this.getCredentialsPath();
 
     if (!existsSync(credPath)) {
-      return null;
+      return this.importCodexCliCredentials();
     }
 
     try {
       const data = readFileSync(credPath, "utf-8");
-      const credentials = JSON.parse(data) as CodexCredentials;
+      const credentials = this.parseCredentials(JSON.parse(data));
 
       // Validate structure
-      if (!credentials.access_token || !credentials.refresh_token || !credentials.expires_at) {
+      if (!credentials?.access_token || !credentials.refresh_token || !credentials.expires_at) {
         log("[CodexOAuth] Invalid credentials file structure");
         return null;
       }
@@ -311,16 +324,71 @@ export class CodexOAuth {
     }
   }
 
+  private importCodexCliCredentials(): CodexCredentials | null {
+    const codexCliPath = this.getCodexCliCredentialsPath();
+    if (!existsSync(codexCliPath)) return null;
+
+    try {
+      const credentials = this.parseCredentials(JSON.parse(readFileSync(codexCliPath, "utf-8")));
+      if (!credentials?.access_token || !credentials.refresh_token || !credentials.expires_at) {
+        return null;
+      }
+      this.saveCredentials(credentials);
+      log(`[CodexOAuth] Imported credentials from ${codexCliPath}`);
+      return credentials;
+    } catch (e: any) {
+      log(`[CodexOAuth] Failed to import Codex CLI credentials: ${e.message}`);
+      return null;
+    }
+  }
+
+  private parseCredentials(data: any): CodexCredentials | null {
+    if (data?.auth_mode === "chatgpt" && data.tokens) {
+      const accessToken = data.tokens.access_token;
+      const refreshToken = data.tokens.refresh_token;
+      if (typeof accessToken !== "string" || typeof refreshToken !== "string") return null;
+      return {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        expires_at:
+          typeof data.expires === "number"
+            ? data.expires
+            : this.extractExpiryMs(accessToken) || Date.now(),
+        account_id:
+          typeof data.tokens.account_id === "string"
+            ? data.tokens.account_id
+            : this.extractAccountId(accessToken),
+        id_token: typeof data.tokens.id_token === "string" ? data.tokens.id_token : undefined,
+      };
+    }
+
+    if (typeof data?.access_token !== "string" || typeof data?.refresh_token !== "string") {
+      return null;
+    }
+    return {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at:
+        typeof data.expires_at === "number"
+          ? data.expires_at
+          : this.extractExpiryMs(data.access_token) || Date.now(),
+      account_id:
+        typeof data.account_id === "string"
+          ? data.account_id
+          : this.extractAccountId(data.access_token),
+      id_token: typeof data.id_token === "string" ? data.id_token : undefined,
+    };
+  }
+
   /**
    * Save credentials to file with 0600 permissions
    */
   private saveCredentials(credentials: CodexCredentials): void {
     const credPath = this.getCredentialsPath();
-    const claudishDir = join(homedir(), ".claudish");
+    const claudishDir = process.env.CLAUDISH_HOME || join(homedir(), ".claudish");
 
     // Ensure directory exists
     if (!existsSync(claudishDir)) {
-      const { mkdirSync } = require("node:fs");
       mkdirSync(claudishDir, { recursive: true });
     }
 
@@ -351,18 +419,27 @@ export class CodexOAuth {
     return hash;
   }
 
-  /**
-   * Extract chatgpt_account_id from id_token JWT payload.
-   * Simple base64 decode of the payload section — no signature validation needed
-   * (the token was just received over HTTPS from the auth server).
-   */
-  private extractAccountId(idToken: string): string | undefined {
+  private decodeJwtPayload(token: string | undefined): any {
     try {
-      const parts = idToken.split(".");
+      if (!token) return undefined;
+      const parts = token.split(".");
       if (parts.length !== 3) return undefined;
 
-      // Decode the payload (second part)
-      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+      return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+    } catch (e: any) {
+      log(`[CodexOAuth] Failed to decode JWT payload: ${e.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Extract chatgpt_account_id from the OpenAI auth claim.
+   * The official Codex CLI stores this claim in the access token.
+   */
+  private extractAccountId(token: string | undefined): string | undefined {
+    try {
+      const payload = this.decodeJwtPayload(token);
+      if (!payload) return undefined;
       const authClaim = payload["https://api.openai.com/auth"];
       const accountId =
         authClaim?.chatgpt_account_id || payload.chatgpt_account_id || authClaim?.user_id;
@@ -374,9 +451,14 @@ export class CodexOAuth {
 
       return undefined;
     } catch (e: any) {
-      log(`[CodexOAuth] Failed to extract account ID from id_token: ${e.message}`);
+      log(`[CodexOAuth] Failed to extract account ID from token: ${e.message}`);
       return undefined;
     }
+  }
+
+  private extractExpiryMs(token: string | undefined): number | undefined {
+    const exp = this.decodeJwtPayload(token)?.exp;
+    return typeof exp === "number" ? Math.floor(exp * 1000) : undefined;
   }
 
   /**
@@ -387,16 +469,16 @@ export class CodexOAuth {
     // Use + for scope separators (matching working opencode implementation)
     const scope = OAUTH_CONFIG.scopes.join("+");
     const params = [
-      `response_type=code`,
+      "response_type=code",
       `client_id=${encodeURIComponent(OAUTH_CONFIG.clientId)}`,
       `redirect_uri=${encodeURIComponent(redirectUri)}`,
       `scope=${scope}`,
       `code_challenge=${encodeURIComponent(codeChallenge)}`,
-      `code_challenge_method=S256`,
-      `id_token_add_organizations=true`,
-      `codex_cli_simplified_flow=true`,
+      "code_challenge_method=S256",
+      "id_token_add_organizations=true",
+      "codex_cli_simplified_flow=true",
       `state=${encodeURIComponent(state)}`,
-      `originator=opencode`,
+      "originator=openclaw",
     ].join("&");
 
     return `${OAUTH_CONFIG.authUrl}?${params}`;

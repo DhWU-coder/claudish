@@ -29,8 +29,9 @@ export class ProcessManager {
 
     // Ensure data directory exists
     if (!fs.existsSync(this.dataDir)) {
-      fs.mkdirSync(this.dataDir, { recursive: true });
+      fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
     }
+    fs.chmodSync(this.dataDir, 0o700);
   }
 
   /**
@@ -62,7 +63,7 @@ export class ProcessManager {
             fs.unlinkSync(this.pidFilePath);
           } catch (unlinkErr) {
             // File might already be deleted by cleanupZombies
-            if ((unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+            if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") {
               throw unlinkErr;
             }
           }
@@ -78,9 +79,10 @@ export class ProcessManager {
       };
 
       // Use 'wx' flag for atomic creation (fails if file exists)
-      const fd = fs.openSync(this.pidFilePath, "wx");
+      const fd = fs.openSync(this.pidFilePath, "wx", 0o600);
       fs.writeSync(fd, JSON.stringify(pidData, null, 2));
       fs.closeSync(fd);
+      fs.chmodSync(this.pidFilePath, 0o600);
 
       console.error(`[ProcessManager] Lock acquired (PID ${this.currentPid})`);
       return true;
@@ -120,7 +122,8 @@ export class ProcessManager {
         port,
       };
 
-      fs.writeFileSync(this.pidFilePath, JSON.stringify(updatedData, null, 2));
+      fs.writeFileSync(this.pidFilePath, JSON.stringify(updatedData, null, 2), { mode: 0o600 });
+      fs.chmodSync(this.pidFilePath, 0o600);
       console.error(`[ProcessManager] Updated PID file with port ${port}`);
     } catch (error) {
       console.error("[ProcessManager] Error updating PID file:", error);

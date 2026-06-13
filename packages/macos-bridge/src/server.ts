@@ -137,14 +137,16 @@ export class BridgeServer {
     });
 
     /**
-     * GET /debug/state - Debug endpoint to show config and routing state (public)
+     * GET /debug/state - Authenticated debug endpoint with sanitized state.
      */
     this.app.get("/debug/state", (c) => {
-      const config = this.configManager.getConfig();
-      const routingConfig = this.connectHandler?.getRoutingConfig() || { enabled: false, modelMap: {} };
+      const routingConfig = this.connectHandler?.getRoutingConfig() || {
+        enabled: false,
+        modelMap: {},
+      };
       return c.json({
-        config,
-        routingConfig,
+        routingEnabled: routingConfig.enabled,
+        routingModelCount: Object.keys(routingConfig.modelMap).length,
         proxyEnabled: this.routingMiddleware !== null,
         connectHandlerExists: this.connectHandler !== null,
       });
@@ -390,7 +392,10 @@ export class BridgeServer {
           await this.cycleTLSManager.initialize();
           console.error("[bridge] CycleTLS initialized successfully");
         } catch (cycleTLSError) {
-          console.error("[bridge] CycleTLS failed to initialize, will use native TLS fallback:", cycleTLSError);
+          console.error(
+            "[bridge] CycleTLS failed to initialize, will use native TLS fallback:",
+            cycleTLSError
+          );
           this.cycleTLSManager = null;
         }
 
@@ -1047,8 +1052,9 @@ export class BridgeServer {
         try {
           // Ensure directory exists
           if (!fs.existsSync(dataDir)) {
-            fs.mkdirSync(dataDir, { recursive: true });
+            fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
           }
+          fs.chmodSync(dataDir, 0o700);
 
           // Write atomically
           const lockData = {
@@ -1058,7 +1064,8 @@ export class BridgeServer {
             startTime: new Date().toISOString(),
           };
 
-          fs.writeFileSync(tokenFile, JSON.stringify(lockData, null, 2));
+          fs.writeFileSync(tokenFile, JSON.stringify(lockData, null, 2), { mode: 0o600 });
+          fs.chmodSync(tokenFile, 0o600);
           console.error(`[bridge] Lock file written to ${tokenFile}`);
         } catch (e) {
           console.error("[bridge] CRITICAL: Failed to write lock file:", e);

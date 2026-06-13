@@ -78,6 +78,8 @@ const isLoginCommand = firstPositional === "login";
 const isLogoutCommand = firstPositional === "logout";
 // Quota subcommand: claudish quota [provider]
 const isQuotaCommand = firstPositional === "quota" || firstPositional === "usage";
+// Interactive custom provider setup
+const isSetProviderCommand = args.includes("--set-provider");
 // Legacy auth flags (deprecated, redirect to new subcommands)
 const isLegacyGeminiLogin = args.includes("--gemini-login");
 const isLegacyGeminiLogout = args.includes("--gemini-logout");
@@ -115,6 +117,8 @@ if (isMcpMode) {
     (a, i) => i > args.indexOf(firstPositional!) && !a.startsWith("-")
   );
   import("./auth/quota-command.js").then((m) => m.quotaCommand(quotaProviderArg));
+} else if (isSetProviderCommand) {
+  import("./provider-setup-command.js").then((m) => m.setProviderCommand().catch(handlePromptExit));
 } else if (isUpdateCommand) {
   // Self-update command (checked early to work with aliases like `claudish -y update`)
   import("./update-command.js").then((m) => m.updateCommand());

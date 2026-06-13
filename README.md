@@ -10,7 +10,7 @@
 
 **Use your existing AI subscriptions with Claude Code.** Works with Anthropic Max, Gemini Advanced, ChatGPT Plus/Codex, Kimi, GLM, OllamaCloud — plus 580+ models via OpenRouter and local models for complete privacy.
 
-[Website](https://claudish.com) · [Documentation](https://github.com/MadAppGang/claudish/blob/main/docs/index.md) · [Report Bug](https://github.com/MadAppGang/claudish/issues)
+[Website](https://claudish.com) · [Documentation](https://github.com/MadAppGang/claudish/blob/main/docs/index.md) · [中文说明](README_zh.md) · [Report Bug](https://github.com/MadAppGang/claudish/issues)
 
 </div>
 
@@ -272,6 +272,8 @@ claudish [OPTIONS] <claude-args...>
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--model <model>` | `-m` | Model to use (`provider@model` syntax) | Interactive selector |
+| `--default-model <model>` | | Save the default model to `~/.claudish/config.json` | |
+| `--set-provider` | | Interactively add an OpenAI/Anthropic/Gemini-compatible provider | |
 | `--default-provider <name>` | | Default provider for bare model routing (v7.0.0+) | Auto-detected |
 | `--model-opus <model>` | | Model for Opus role (planning, complex tasks) | |
 | `--model-sonnet <model>` | | Model for Sonnet role (default coding) | |
@@ -341,7 +343,7 @@ Claudish automatically loads `.env` from the current directory at startup. For t
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLAUDISH_MODEL` | Default model (overrides `ANTHROPIC_MODEL`) | Interactive selector |
+| `CLAUDISH_MODEL` | Default model for this shell (overrides config and `ANTHROPIC_MODEL`) | Config default or selector |
 | `CLAUDISH_PORT` | Default proxy port | Random (3000-9000) |
 | `CLAUDISH_CONTEXT_WINDOW` | Override context window size (local models) | Auto-detected |
 | `CLAUDISH_MODEL_OPUS` | Model for Opus role | |
@@ -542,7 +544,52 @@ Precedence: `--default-provider` flag > `CLAUDISH_DEFAULT_PROVIDER` env var > co
 
 Explicit `provider@model` syntax always bypasses `defaultProvider` and routes directly.
 
+### Default model
+
+Set a global default model when you do not want to pass `--model` every time:
+
+```bash
+claudish --default-model cx@gpt-5.5
+claudish "write tests for the auth module"
+```
+
+This writes `defaultModel` to `~/.claudish/config.json`:
+
+```json
+{
+  "defaultModel": "cx@gpt-5.5"
+}
+```
+
+Precedence: `--model` flag > `CLAUDISH_MODEL` env var > config file `defaultModel` > `ANTHROPIC_MODEL` fallback > interactive selector.
+
 ### Custom endpoints (v7.0.0+)
+
+The easiest way to add an OpenAI-compatible, Anthropic-compatible, or Gemini-compatible endpoint is:
+
+```bash
+claudish --set-provider
+```
+
+The wizard asks for:
+
+```text
+provider-id
+provider compatible type: openai / anthropic / gemini
+base_url
+api-key
+model-id
+```
+
+After setup:
+
+```bash
+# Use the provider's configured default model
+claudish --model <provider-id> "task"
+
+# Override the model for one run
+claudish --model <provider-id>@<model-id> "task"
+```
 
 Register your own OpenAI-compatible endpoints in `~/.claudish/config.json`. See [Settings Reference](docs/settings-reference.md) for the full schema.
 
@@ -553,14 +600,15 @@ Register your own OpenAI-compatible endpoints in `~/.claudish/config.json`. See 
       "kind": "simple",
       "url": "http://gpu-box:8000/v1",
       "format": "openai",
-      "apiKey": "none"
+      "apiKey": "none",
+      "defaultModel": "llama3"
     }
   },
   "defaultProvider": "my-vllm"
 }
 ```
 
-Then route to it with: `claudish --model my-vllm@llama3 "task"`
+Then route to it with: `claudish --model my-vllm "task"` or override with `claudish --model my-vllm@qwen2.5 "task"`.
 
 ### Legacy Syntax (Deprecated)
 
