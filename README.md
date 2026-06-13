@@ -10,7 +10,7 @@
 
 **Use your existing AI subscriptions with Claude Code.** Works with Anthropic Max, Gemini Advanced, ChatGPT Plus/Codex, Kimi, GLM, OllamaCloud — plus 580+ models via OpenRouter and local models for complete privacy.
 
-[Website](https://claudish.com) · [Documentation](https://github.com/MadAppGang/claudish/blob/main/docs/index.md) · [中文说明](README_zh.md) · [Report Bug](https://github.com/MadAppGang/claudish/issues)
+[Documentation](docs/index.md) · [中文说明](README_zh.md) · [Report Bug](https://github.com/DhWU-coder/claudish/issues)
 
 </div>
 
@@ -80,12 +80,6 @@ Claudish is a **BYOK AI coding assistant**:
 ### Quick Install
 
 ```bash
-# Shell script (Linux/macOS)
-curl -fsSL https://raw.githubusercontent.com/MadAppGang/claudish/main/install.sh | bash
-
-# Homebrew (macOS)
-brew tap MadAppGang/tap && brew install claudish
-
 # npm
 npm install -g claudish
 
@@ -115,7 +109,7 @@ bunx claudish@latest --model x-ai/grok-code-fast-1 "your prompt"
 **Install from source:**
 
 ```bash
-git clone https://github.com/MadAppGang/claudish.git
+git clone https://github.com/DhWU-coder/claudish.git
 cd claudish
 bun install && bun run build && bun link
 ```
@@ -1201,7 +1195,7 @@ mcp/claudish/
 │   ├── index.ts              # Main entry point
 │   ├── cli.ts                # CLI argument parser
 │   ├── proxy-server.ts       # Hono-based proxy server
-│   ├── transform.ts          # API format translation (from claude-code-proxy)
+│   ├── transform.ts          # API format translation
 │   ├── claude-runner.ts      # Claude CLI runner (creates temp settings)
 │   ├── port-manager.ts       # Port utilities
 │   ├── config.ts             # Constants and defaults
@@ -1216,13 +1210,13 @@ mcp/claudish/
 
 ### Proxy Implementation
 
-Claudish uses a **Hono-based proxy server** inspired by [claude-code-proxy](https://github.com/kiyo-e/claude-code-proxy):
+Claudish uses a **Hono-based proxy server**:
 
 - **Framework**: [Hono](https://hono.dev/) - Fast, lightweight web framework
 - **API Translation**: Converts Anthropic API format ↔ OpenAI format
 - **Streaming**: Full support for Server-Sent Events (SSE)
 - **Tool Calling**: Handles Claude's tool_use ↔ OpenAI's tool_calls
-- **Battle-tested**: Based on production-ready claude-code-proxy implementation
+- **Protocol-focused**: Keeps Claude Code compatibility isolated behind a local proxy
 
 **Why Hono?**
 - Native Bun support (no adapters needed)
@@ -1415,29 +1409,12 @@ Contributions welcome! Please:
 
 ## License
 
-MIT © MadAppGang
-
-## Acknowledgments
-
-Claudish's proxy implementation is based on [claude-code-proxy](https://github.com/kiyo-e/claude-code-proxy) by [@kiyo-e](https://github.com/kiyo-e). We've adapted their excellent Hono-based API translation layer for OpenRouter integration.
-
-**Key contributions from claude-code-proxy:**
-- Anthropic ↔ OpenAI API format translation (`transform.ts`)
-- Streaming response handling with Server-Sent Events
-- Tool calling compatibility layer
-- Clean Hono framework architecture
-
-Thank you to the claude-code-proxy team for building a robust, production-ready foundation! 🙏
+MIT. See [LICENSE](LICENSE).
 
 ## Links
 
-- **GitHub**: https://github.com/MadAppGang/claudish
+- **GitHub**: https://github.com/DhWU-coder/claudish
 - **OpenRouter**: https://openrouter.ai
 - **Claude Code**: https://claude.com/claude-code
 - **Bun**: https://bun.sh
 - **Hono**: https://hono.dev
-- **claude-code-proxy**: https://github.com/kiyo-e/claude-code-proxy
-
----
-
-Made with ❤️ by [MadAppGang](https://madappgang.com)

@@ -10,7 +10,7 @@
 
 **用你已有的 AI 订阅和 API Key 跑 Claude Code。** 支持 Anthropic Max、Gemini Advanced、ChatGPT Plus/Codex、Kimi、GLM、OllamaCloud，以及 OpenRouter 上的 580+ 模型和本地模型。
 
-[Website](https://claudish.com) · [Documentation](https://github.com/MadAppGang/claudish/blob/main/docs/index.md) · [Issues](https://github.com/MadAppGang/claudish/issues)
+[文档](docs/index.md) · [English](README.md) · [Issues](https://github.com/DhWU-coder/claudish/issues)
 
 </div>
 
@@ -63,12 +63,6 @@ claudish --model ollama@qwen3-coder:latest "你的任务"
 ### 快速安装
 
 ```bash
-# Linux/macOS 安装脚本
-curl -fsSL https://raw.githubusercontent.com/MadAppGang/claudish/main/install.sh | bash
-
-# macOS Homebrew
-brew tap MadAppGang/tap && brew install claudish
-
 # npm
 npm install -g claudish
 
@@ -86,7 +80,7 @@ bunx claudish@latest --model cx@gpt-5.5 "你的任务"
 ### 从源码安装
 
 ```bash
-git clone https://github.com/MadAppGang/claudish.git
+git clone https://github.com/DhWU-coder/claudish.git
 cd claudish
 bun install
 bun run --cwd packages/cli build
@@ -533,7 +527,7 @@ MIT。详见 [LICENSE](LICENSE)。
 ## 链接
 
 - npm: https://www.npmjs.com/package/claudish
-- GitHub: https://github.com/MadAppGang/claudish
+- GitHub: https://github.com/DhWU-coder/claudish
 - OpenRouter: https://openrouter.ai
 - Claude Code: https://claude.com/claude-code
-- Documentation: https://github.com/MadAppGang/claudish/blob/main/docs/index.md
+- Documentation: docs/index.md
