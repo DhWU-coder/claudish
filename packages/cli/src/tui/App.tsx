@@ -2,6 +2,12 @@
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useCallback, useMemo, useState } from "react";
 import {
+  deleteCustomProvider,
+  getConfigEditorState,
+  saveGeneralDefaults,
+  saveSimpleCustomProvider,
+} from "../config-editor.js";
+import {
   loadConfig,
   loadLocalConfig,
   removeApiKey,
@@ -15,6 +21,17 @@ import { route } from "../providers/routing-rules.js";
 import { clearBuffer, getBufferStats } from "../stats-buffer.js";
 import { testProviderKey } from "./test-provider.js";
 import { PROVIDERS, ProviderDef, maskKey } from "./providers.js";
+import {
+  DefaultsContent,
+  DefaultsDetail,
+  type CustomProviderDraft,
+} from "./DefaultsPanel.js";
+import {
+  buildCompactConfigMenuItems,
+  getCompactConfigWindow,
+  getSmallTerminalMessage,
+  shouldUseCompactConfigMenu,
+} from "./terminal-size.js";
 import { C } from "./theme.js";
 
 const VERSION = "v5.16";
@@ -47,11 +64,18 @@ const PROVIDER_PREFIXES = PROVIDERS.map((p) => ({
   name: p.name,
 }));
 
-type Tab = "providers" | "profiles" | "routing" | "privacy";
+type Tab = "providers" | "defaults" | "profiles" | "routing" | "privacy";
 type Mode =
   | "browse"
   | "input_key"
   | "input_endpoint"
+  | "edit_default_model"
+  | "edit_default_provider"
+  | "custom_provider_id"
+  | "custom_provider_format"
+  | "custom_provider_url"
+  | "custom_provider_key"
+  | "custom_provider_model"
   | "add_routing_pattern"
   | "add_routing_chain"
   | "new_profile"
@@ -113,6 +137,15 @@ export function App() {
   const [providerPickerIndex, setProviderPickerIndex] = useState(0);
   const [providerPickerReturnMode, setProviderPickerReturnMode] =
     useState<Mode>("edit_profile_opus");
+  const [customProviderIndex, setCustomProviderIndex] = useState(0);
+  const [compactMenuIndex, setCompactMenuIndex] = useState(0);
+  const [customProviderDraft, setCustomProviderDraft] = useState<CustomProviderDraft>({
+    providerId: "",
+    format: "openai",
+    baseUrl: "",
+    apiKey: "",
+    defaultModel: "",
+  });
 
   // Chain selector uses same PROVIDERS list for consistent naming
   const CHAIN_PROVIDERS = PROVIDERS;
@@ -165,10 +198,24 @@ export function App() {
 
   const ruleEntries = Object.entries(config.routing ?? {});
   const profileName = config.defaultProfile || "default";
+  const editorState = useMemo(() => getConfigEditorState(), [config]);
+  const customProviders = editorState.customProviders;
 
   const readyCount = PROVIDERS.filter(
     (p) => !!(config.apiKeys?.[p.apiKeyEnvVar] || process.env[p.apiKeyEnvVar])
   ).length;
+  const compactMenuItems = useMemo(
+    () =>
+      buildCompactConfigMenuItems({
+        customProviders,
+        defaultModel: config.defaultModel,
+        defaultProvider: config.defaultProvider,
+        effectiveDefaultModel: editorState.effectiveDefaultModel.value,
+        effectiveDefaultProvider: editorState.effectiveDefaultProvider.value,
+      }),
+    [config.defaultModel, config.defaultProvider, customProviders, editorState]
+  );
+  const compactMenuEnabled = shouldUseCompactConfigMenu(width, height);
 
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") return quit();
@@ -326,6 +373,171 @@ export function App() {
       } else if (key.name === "escape") {
         setInputValue("");
         setMode("browse");
+      }
+      return;
+    }
+
+    // Default model/provider inputs are shared by TUI and Web UI through config-editor.
+    if (mode === "edit_default_model" || mode === "edit_default_provider") {
+      if (key.name === "return" || key.name === "enter") {
+        try {
+          if (mode === "edit_default_model") {
+            saveGeneralDefaults({
+              defaultModel: inputValue,
+              defaultProvider: config.defaultProvider ?? "",
+            });
+            setStatusMsg(inputValue.trim() ? "Default model saved." : "Default model cleared.");
+          } else {
+            saveGeneralDefaults({
+              defaultModel: config.defaultModel ?? "",
+              defaultProvider: inputValue,
+            });
+            setStatusMsg(
+              inputValue.trim() ? "Default provider saved." : "Default provider cleared."
+            );
+          }
+          refreshConfig();
+        } catch (err) {
+          setStatusMsg(err instanceof Error ? err.message : String(err));
+        }
+        setInputValue("");
+        setMode("browse");
+      } else if (key.name === "escape") {
+        setInputValue("");
+        setMode("browse");
+      }
+      return;
+    }
+
+    // Compact terminals use a scrollable command menu instead of the full TUI.
+    if (compactMenuEnabled) {
+      if (key.name === "q") return quit();
+      if (key.name === "up" || key.name === "k") {
+        setCompactMenuIndex((index) => Math.max(0, index - 1));
+      } else if (key.name === "down" || key.name === "j") {
+        setCompactMenuIndex((index) => Math.min(compactMenuItems.length - 1, index + 1));
+      } else if (key.name === "tab") {
+        setCompactMenuIndex((index) => (index + 1) % Math.max(1, compactMenuItems.length));
+      } else if (key.name === "return" || key.name === "enter") {
+        const selectedItem =
+          compactMenuItems[Math.min(compactMenuIndex, compactMenuItems.length - 1)];
+        if (selectedItem?.id === "default-model") {
+          setInputValue(config.defaultModel ?? "");
+          setMode("edit_default_model");
+        } else if (selectedItem?.id === "default-provider") {
+          setInputValue(config.defaultProvider ?? "");
+          setMode("edit_default_provider");
+        } else if (selectedItem?.id === "web-ui") {
+          setStatusMsg("Run `claudish web` for the full browser configuration UI.");
+        } else if (selectedItem) {
+          setStatusMsg(`${selectedItem.label}: ${selectedItem.detail}`);
+        }
+      }
+      return;
+    }
+
+    // Custom provider wizard. It writes the same customEndpoints schema as --set-provider.
+    if (
+      mode === "custom_provider_id" ||
+      mode === "custom_provider_url" ||
+      mode === "custom_provider_key" ||
+      mode === "custom_provider_model"
+    ) {
+      const setDraftText = (field: keyof CustomProviderDraft, value: string) => {
+        setCustomProviderDraft((prev) => ({ ...prev, [field]: value }));
+      };
+      const current =
+        mode === "custom_provider_id"
+          ? customProviderDraft.providerId
+          : mode === "custom_provider_url"
+            ? customProviderDraft.baseUrl
+            : mode === "custom_provider_key"
+              ? customProviderDraft.apiKey
+              : customProviderDraft.defaultModel;
+      const field =
+        mode === "custom_provider_id"
+          ? "providerId"
+          : mode === "custom_provider_url"
+            ? "baseUrl"
+            : mode === "custom_provider_key"
+              ? "apiKey"
+              : "defaultModel";
+
+      if (key.name === "return" || key.name === "enter") {
+        if (mode === "custom_provider_id") {
+          if (!customProviderDraft.providerId.trim()) {
+            setStatusMsg("provider-id is required.");
+            return;
+          }
+          setStatusMsg(null);
+          setMode("custom_provider_format");
+        } else if (mode === "custom_provider_url") {
+          if (!customProviderDraft.baseUrl.trim()) {
+            setStatusMsg("base_url is required.");
+            return;
+          }
+          setStatusMsg(null);
+          setMode("custom_provider_key");
+        } else if (mode === "custom_provider_key") {
+          if (!customProviderDraft.apiKey.trim()) {
+            setStatusMsg("api-key is required.");
+            return;
+          }
+          setStatusMsg(null);
+          setMode("custom_provider_model");
+        } else {
+          try {
+            saveSimpleCustomProvider({
+              providerId: customProviderDraft.providerId,
+              format: customProviderDraft.format,
+              baseUrl: customProviderDraft.baseUrl,
+              apiKey: customProviderDraft.apiKey,
+              defaultModel: customProviderDraft.defaultModel,
+            });
+            refreshConfig();
+            setStatusMsg(`Provider "${customProviderDraft.providerId.trim().toLowerCase()}" saved.`);
+            setCustomProviderDraft({
+              providerId: "",
+              format: "openai",
+              baseUrl: "",
+              apiKey: "",
+              defaultModel: "",
+            });
+            setMode("browse");
+          } catch (err) {
+            setStatusMsg(err instanceof Error ? err.message : String(err));
+          }
+        }
+      } else if (key.name === "escape") {
+        setCustomProviderDraft({
+          providerId: "",
+          format: "openai",
+          baseUrl: "",
+          apiKey: "",
+          defaultModel: "",
+        });
+        setStatusMsg(null);
+        setMode("browse");
+      } else if (key.name === "backspace" || key.name === "delete") {
+        setDraftText(field, current.slice(0, -1));
+      } else if (key.raw && key.raw.length === 1 && !key.ctrl && !key.meta) {
+        setDraftText(field, current + key.raw);
+      }
+      return;
+    }
+
+    if (mode === "custom_provider_format") {
+      if (key.raw === "o" || key.raw === "O") {
+        setCustomProviderDraft((prev) => ({ ...prev, format: "openai" }));
+        setMode("custom_provider_url");
+      } else if (key.raw === "a" || key.raw === "A") {
+        setCustomProviderDraft((prev) => ({ ...prev, format: "anthropic" }));
+        setMode("custom_provider_url");
+      } else if (key.raw === "g" || key.raw === "G") {
+        setCustomProviderDraft((prev) => ({ ...prev, format: "gemini" }));
+        setMode("custom_provider_url");
+      } else if (key.name === "escape") {
+        setMode("custom_provider_id");
       }
       return;
     }
@@ -639,7 +851,7 @@ export function App() {
     if (key.name === "q") return quit();
 
     if (key.name === "tab") {
-      const tabs: Tab[] = ["providers", "profiles", "routing", "privacy"];
+      const tabs: Tab[] = ["providers", "defaults", "profiles", "routing", "privacy"];
       const idx = tabs.indexOf(activeTab);
       setActiveTab(tabs[(idx + 1) % tabs.length]!);
       setStatusMsg(null);
@@ -653,16 +865,21 @@ export function App() {
       return;
     }
     if (key.name === "2") {
-      setActiveTab("profiles");
+      setActiveTab("defaults");
       setStatusMsg(null);
       return;
     }
     if (key.name === "3") {
-      setActiveTab("routing");
+      setActiveTab("profiles");
       setStatusMsg(null);
       return;
     }
     if (key.name === "4") {
+      setActiveTab("routing");
+      setStatusMsg(null);
+      return;
+    }
+    if (key.name === "5") {
       setActiveTab("privacy");
       setStatusMsg(null);
       return;
@@ -720,6 +937,60 @@ export function App() {
             [provName]: ok ? { status: "valid", ms } : { status: "failed", error: result, ms },
           }));
         });
+      }
+    } else if (activeTab === "defaults") {
+      if (key.name === "up" || key.name === "k") {
+        setCustomProviderIndex((i) => Math.max(0, i - 1));
+        setStatusMsg(null);
+      } else if (key.name === "down" || key.name === "j") {
+        setCustomProviderIndex((i) => Math.min(Math.max(0, customProviders.length - 1), i + 1));
+        setStatusMsg(null);
+      } else if (key.name === "m") {
+        setInputValue(config.defaultModel ?? "");
+        setStatusMsg(null);
+        setMode("edit_default_model");
+      } else if (key.name === "p") {
+        setInputValue(config.defaultProvider ?? "");
+        setStatusMsg(null);
+        setMode("edit_default_provider");
+      } else if (key.name === "n") {
+        setCustomProviderDraft({
+          providerId: "",
+          format: "openai",
+          baseUrl: "",
+          apiKey: "",
+          defaultModel: "",
+        });
+        setStatusMsg(null);
+        setMode("custom_provider_id");
+      } else if (key.name === "e") {
+        const selected = customProviders[customProviderIndex];
+        if (!selected) {
+          setStatusMsg("No custom provider selected.");
+        } else if (selected.kind !== "simple") {
+          setStatusMsg("Only simple custom providers can be edited in the TUI.");
+        } else {
+          setCustomProviderDraft({
+            providerId: selected.id,
+            format: selected.format ?? "openai",
+            baseUrl: selected.baseUrl ?? "",
+            apiKey: selected.apiKey,
+            defaultModel: selected.defaultModel ?? "",
+          });
+          setStatusMsg(null);
+          setMode("custom_provider_id");
+        }
+      } else if (key.name === "d") {
+        const selected = customProviders[customProviderIndex];
+        if (!selected) {
+          setStatusMsg("No custom provider selected.");
+        } else if (deleteCustomProvider(selected.id)) {
+          refreshConfig();
+          setCustomProviderIndex((i) => Math.max(0, i - 1));
+          setStatusMsg(`Provider "${selected.id}" deleted.`);
+        } else {
+          setStatusMsg(`Provider "${selected.id}" was not found.`);
+        }
       }
     } else if (activeTab === "profiles") {
       // Build profile list for navigation
@@ -862,20 +1133,32 @@ export function App() {
     }
   });
 
-  if (height < 15 || width < 60) {
+  if (width < 60) {
     return (
       <box width="100%" height="100%" padding={1} backgroundColor={C.bg}>
         <text>
           <span fg={C.red} bold>
-            Terminal too small ({width}x{height}). Resize to at least 60x15.
+            {getSmallTerminalMessage(width, height)}
           </span>
         </text>
       </box>
     );
   }
 
-  const isInputMode = mode === "input_key" || mode === "input_endpoint";
+  const isInputMode =
+    mode === "input_key" ||
+    mode === "input_endpoint" ||
+    mode === "edit_default_model" ||
+    mode === "edit_default_provider";
   const isRoutingInput = mode === "add_routing_pattern" || mode === "add_routing_chain";
+  const isDefaultsEditMode =
+    mode === "edit_default_model" ||
+    mode === "edit_default_provider" ||
+    mode === "custom_provider_id" ||
+    mode === "custom_provider_format" ||
+    mode === "custom_provider_url" ||
+    mode === "custom_provider_key" ||
+    mode === "custom_provider_model";
   const isProfileEditMode =
     mode === "new_profile" ||
     mode === "pick_profile_scope" ||
@@ -893,13 +1176,127 @@ export function App() {
   const DETAIL_H = 7;
   const contentH = Math.max(4, height - HEADER_H - TABS_H - DETAIL_H - FOOTER_H - 1);
 
+  // Compact height mode keeps configuration usable when only a few rows fit.
+  if (compactMenuEnabled) {
+    const compactSelectedIndex = Math.min(compactMenuIndex, compactMenuItems.length - 1);
+    const compactVisibleRows = Math.max(1, height - 4);
+    const compactWindow = getCompactConfigWindow(
+      compactMenuItems,
+      compactSelectedIndex,
+      compactVisibleRows
+    );
+    const compactInputMode = mode === "edit_default_model" || mode === "edit_default_provider";
+
+    if (compactInputMode) {
+      const label = mode === "edit_default_model" ? "Default model" : "Default provider";
+      return (
+        <box width={width} height={height} flexDirection="column" backgroundColor={C.bg}>
+          <box height={1} backgroundColor={C.bgAlt} paddingX={1}>
+            <text>
+              <span fg={C.white} bold>
+                claudish config
+              </span>
+              <span fg={C.dim}>{" compact edit"}</span>
+            </text>
+          </box>
+          <box height={Math.max(3, height - 2)} flexDirection="column" paddingX={1}>
+            <text>
+              <span fg={C.blue} bold>
+                {label}
+              </span>
+            </text>
+            <box flexDirection="row">
+              <text>
+                <span fg={C.green} bold>
+                  {"> "}
+                </span>
+              </text>
+              <input
+                value={inputValue}
+                onChange={setInputValue}
+                focused={true}
+                width={Math.max(16, width - 6)}
+                backgroundColor={C.bgHighlight}
+                textColor={C.white}
+              />
+            </box>
+            <text>
+              <span fg={C.green} bold>
+                Enter{" "}
+              </span>
+              <span fg={C.fgMuted}>save · </span>
+              <span fg={C.red} bold>
+                Esc{" "}
+              </span>
+              <span fg={C.fgMuted}>cancel</span>
+            </text>
+          </box>
+        </box>
+      );
+    }
+
+    return (
+      <box width={width} height={height} flexDirection="column" backgroundColor={C.bg}>
+        <box height={1} backgroundColor={C.bgAlt} paddingX={1}>
+          <text>
+            <span fg={C.white} bold>
+              claudish config
+            </span>
+            <span fg={C.dim}>{` compact ${width}x${height}`}</span>
+          </text>
+        </box>
+        <box height={Math.max(1, height - 3)} flexDirection="column" paddingX={1}>
+          {compactWindow.visibleItems.map((item, offset) => {
+            const absoluteIndex = compactWindow.start + offset;
+            const selected = absoluteIndex === compactSelectedIndex;
+            return (
+              <text key={item.id}>
+                <span fg={selected ? C.green : C.dim} bold={selected}>
+                  {selected ? "› " : "  "}
+                </span>
+                <span fg={selected ? C.white : C.fgMuted} bold={selected}>
+                  {item.label.padEnd(18).substring(0, 18)}
+                </span>
+                <span fg={selected ? C.cyan : C.dim}>
+                  {item.detail.substring(0, Math.max(0, width - 24))}
+                </span>
+              </text>
+            );
+          })}
+          {statusMsg && (
+            <text>
+              <span fg={C.yellow}>{statusMsg.substring(0, Math.max(0, width - 2))}</span>
+            </text>
+          )}
+        </box>
+        <box height={1} backgroundColor={C.bgAlt} paddingX={1}>
+          <text>
+            <span fg={C.blue} bold>
+              ↑↓{" "}
+            </span>
+            <span fg={C.fgMuted}>scroll · </span>
+            <span fg={C.green} bold>
+              Enter{" "}
+            </span>
+            <span fg={C.fgMuted}>open · </span>
+            <span fg={C.dim} bold>
+              q{" "}
+            </span>
+            <span fg={C.fgMuted}>quit</span>
+          </text>
+        </box>
+      </box>
+    );
+  }
+
   // ── Render helpers ────────────────────────────────────────────────────────
   function TabBar() {
     const tabs: Array<{ label: string; value: Tab; num: string }> = [
       { label: "Providers", value: "providers", num: "1" },
-      { label: "Profiles", value: "profiles", num: "2" },
-      { label: "Routing", value: "routing", num: "3" },
-      { label: "Privacy", value: "privacy", num: "4" },
+      { label: "Defaults", value: "defaults", num: "2" },
+      { label: "Profiles", value: "profiles", num: "3" },
+      { label: "Routing", value: "routing", num: "4" },
+      { label: "Privacy", value: "privacy", num: "5" },
     ];
 
     return (
@@ -2210,6 +2607,22 @@ export function App() {
         [C.blue, "Tab", "section"],
         [C.dim, "q", "quit"],
       ];
+    } else if (activeTab === "defaults" && isDefaultsEditMode) {
+      keys = [
+        [C.green, "Enter", "continue/save"],
+        [C.red, "Esc", mode === "custom_provider_format" ? "back" : "cancel"],
+      ];
+    } else if (activeTab === "defaults") {
+      keys = [
+        [C.blue, "↑↓", "providers"],
+        [C.green, "m", "model"],
+        [C.green, "p", "provider"],
+        [C.cyan, "n", "new custom"],
+        [C.green, "e", "edit custom"],
+        [C.red, "d", "delete custom"],
+        [C.blue, "Tab", "section"],
+        [C.dim, "q", "quit"],
+      ];
     } else if (activeTab === "profiles" && mode === "pick_profile_scope") {
       keys = [
         [C.green, "g", "global"],
@@ -2312,6 +2725,29 @@ export function App() {
         <>
           <ProvidersContent />
           <ProviderDetail />
+        </>
+      )}
+      {activeTab === "defaults" && (
+        <>
+          <DefaultsContent
+            active={activeTab === "defaults"}
+            config={config}
+            contentH={contentH}
+            customProviderDraft={customProviderDraft}
+            customProviderIndex={customProviderIndex}
+            customProviders={customProviders}
+            editorState={editorState}
+            inputValue={inputValue}
+            isDefaultsEditMode={isDefaultsEditMode}
+            mode={mode}
+            setInputValue={setInputValue}
+            width={width}
+          />
+          <DefaultsDetail
+            customProviderIndex={customProviderIndex}
+            customProviders={customProviders}
+            detailH={DETAIL_H}
+          />
         </>
       )}
       {activeTab === "profiles" && (

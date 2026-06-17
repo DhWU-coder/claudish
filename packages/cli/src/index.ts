@@ -7,6 +7,7 @@ config({ quiet: true }); // Loads .env from current working directory
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getFirstPositionalArg, isWebConfigCommand } from "./command-routing.js";
 
 /**
  * Load API keys and custom endpoints from ~/.claudish/config.json into process.env.
@@ -66,13 +67,14 @@ const isProfileCommand =
   args[0] === "profile" ||
   args.some((a, i) => a === "profile" && (i === 0 || !args[i - 1]?.startsWith("-")));
 // Find first positional (non-flag) arg — handles aliases like `claudish -y config`
-const firstPositional = args.find((a) => !a.startsWith("-"));
+const firstPositional = getFirstPositionalArg(args);
 // Check for telemetry management subcommand
 const isTelemetryCommand = firstPositional === "telemetry";
 // Check for stats management subcommand
 const isStatsCommand = firstPositional === "stats";
 // Check for interactive config TUI
 const isConfigCommand = firstPositional === "config";
+const isConfigWebCommand = isWebConfigCommand(args);
 // Auth subcommands: claudish login [provider], claudish logout [provider]
 const isLoginCommand = firstPositional === "login";
 const isLogoutCommand = firstPositional === "logout";
@@ -150,9 +152,14 @@ if (isMcpMode) {
     stats.initStats({ interactive: true } as any);
     return stats.handleStatsCommand(subcommand);
   });
-} else if (isConfigCommand) {
-  // Interactive configuration TUI: claudish config (full-screen btop-inspired TUI)
-  import("./tui/index.js").then((m) => m.startConfigTui().catch(handlePromptExit));
+} else if (isConfigCommand || isConfigWebCommand) {
+  if (isConfigWebCommand) {
+    // Browser configuration UI: claudish web / claudish config --web
+    import("./web-config-server.js").then((m) => m.startConfigWebServer());
+  } else {
+    // Interactive configuration TUI: claudish config (full-screen btop-inspired TUI)
+    import("./tui/index.js").then((m) => m.startConfigTui().catch(handlePromptExit));
+  }
 } else {
   // CLI mode
   runCli();

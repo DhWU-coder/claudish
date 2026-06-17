@@ -17,36 +17,45 @@
  */
 
 import type { Context } from "hono";
-import type { ModelHandler } from "./types.js";
-import type { ProviderTransport } from "../providers/transport/types.js";
 import type { BaseAPIFormat } from "../adapters/base-api-format.js";
+import type { ProviderTransport } from "../providers/transport/types.js";
+import type { ModelHandler } from "./types.js";
 // Alias for readability within this file
 type BaseModelAdapter = BaseAPIFormat;
 import { DialectManager } from "../adapters/dialect-manager.js";
-import { MiddlewareManager, GeminiThoughtSignatureMiddleware } from "../middleware/index.js";
-import { TokenTracker } from "./shared/token-tracker.js";
-import { transformOpenAIToClaude } from "../transform.js";
-import { filterIdentity } from "./shared/openai-compat.js";
-import { createStreamingResponseHandler } from "./shared/stream-parsers/openai-sse.js";
-import { createResponsesStreamHandler } from "./shared/stream-parsers/openai-responses-sse.js";
-import { createAnthropicPassthroughStream } from "./shared/stream-parsers/anthropic-sse.js";
-import { createOllamaJsonlStream } from "./shared/stream-parsers/ollama-jsonl.js";
-import { createGeminiSseStream } from "./shared/stream-parsers/gemini-sse.js";
-import { log, logStderr, logStructured, getLogLevel, truncateContent } from "../logger.js";
+import { writeClaudishUsageFromProviderUsage } from "../claudish-usage-log.js";
+import { writeCodexUsageFromOpenAIUsage } from "../codex-usage-log.js";
+import { getLogLevel, log, logStderr, logStructured, truncateContent } from "../logger.js";
+import { GeminiThoughtSignatureMiddleware, MiddlewareManager } from "../middleware/index.js";
 import {
-  describeImages,
   type OpenAIImageBlock,
   type VisionProxyAuthHeaders,
+  describeImages,
 } from "../services/vision-proxy.js";
-import { reportError, classifyError } from "../telemetry.js";
 import { recordStats } from "../stats.js";
-import { wrapAnthropicError, ensureAnthropicErrorFormat } from "./shared/anthropic-error.js";
+import { classifyError, reportError } from "../telemetry.js";
+import { transformOpenAIToClaude } from "../transform.js";
+import { ensureAnthropicErrorFormat, wrapAnthropicError } from "./shared/anthropic-error.js";
+import { filterIdentity } from "./shared/openai-compat.js";
+import { createAnthropicPassthroughStream } from "./shared/stream-parsers/anthropic-sse.js";
+import { createGeminiSseStream } from "./shared/stream-parsers/gemini-sse.js";
+import { createOllamaJsonlStream } from "./shared/stream-parsers/ollama-jsonl.js";
+import { createResponsesStreamHandler } from "./shared/stream-parsers/openai-responses-sse.js";
+import { createStreamingResponseHandler } from "./shared/stream-parsers/openai-sse.js";
+import { TokenTracker } from "./shared/token-tracker.js";
 
 function extractAuthHeaders(c: Context): VisionProxyAuthHeaders {
   const headers = c.req.header();
   const auth: VisionProxyAuthHeaders = {};
   if (headers["x-api-key"]) auth["x-api-key"] = headers["x-api-key"];
   return auth;
+}
+
+/**
+ * Label the Codex upstream surface without storing any credentials.
+ */
+function codexApiSurfaceForAuth(auth: string): string {
+  return auth === "codex-oauth" ? "chatgpt-codex-responses" : "openai-responses";
 }
 
 export interface ComposedHandlerOptions {
@@ -100,9 +109,7 @@ export class ComposedHandler implements ModelHandler {
     // substring). Callers must strip the provider prefix before passing modelName.
     if (modelName.includes("@")) {
       throw new Error(
-        `ComposedHandler: modelName must not contain '@' (got "${modelName}"). ` +
-          `Strip the provider routing prefix before passing modelName. ` +
-          `If you need the full routed form, pass it as targetModel.`
+        `ComposedHandler: modelName must not contain '@' (got "${modelName}"). Strip the provider routing prefix before passing modelName. If you need the full routed form, pass it as targetModel.`
       );
     }
 
@@ -134,9 +141,7 @@ export class ComposedHandler implements ModelHandler {
     }
     this.middlewareManager
       .initialize()
-      .catch((err) =>
-        log(`[ComposedHandler:${this.bareModelName}] Middleware init error: ${err}`)
-      );
+      .catch((err) => log(`[ComposedHandler:${this.bareModelName}] Middleware init error: ${err}`));
 
     // Initialize token tracker — model adapter knows the real context window
     this.tokenTracker = new TokenTracker(port, {
@@ -252,7 +257,7 @@ export class ComposedHandler implements ModelHandler {
           }
         } else {
           // Vision proxy failed or not applicable — strip all unsupported image/document blocks
-          log(`[ComposedHandler] Stripping image/document blocks (vision not supported)`);
+          log("[ComposedHandler] Stripping image/document blocks (vision not supported)");
           for (const msg of messages) {
             if (Array.isArray(msg.content)) {
               msg.content = msg.content.filter(
@@ -552,10 +557,7 @@ export class ComposedHandler implements ModelHandler {
           } catch {
             // Stats must never crash claudish
           }
-          return c.json(
-            wrapAnthropicError(401, err.message, "authentication_error"),
-            401 as any
-          );
+          return c.json(wrapAnthropicError(401, err.message, "authentication_error"), 401 as any);
         }
       } else {
         const errorText = await response.text();
@@ -622,7 +624,10 @@ export class ComposedHandler implements ModelHandler {
         } catch {
           errorBody = { error: { type: "api_error", message: errorText } };
         }
-        return c.json(ensureAnthropicErrorFormat(response.status, errorBody), response.status as any);
+        return c.json(
+          ensureAnthropicErrorFormat(response.status, errorBody),
+          response.status as any
+        );
       }
     }
 
@@ -689,9 +694,8 @@ export class ComposedHandler implements ModelHandler {
         case "local":
           this.tokenTracker.updateLocal(input, output);
           break;
-        // "actual-cost" is handled separately via updateWithActualCost
-        case "standard":
         default:
+          // Standard and actual-cost both use the normal update path here.
           this.tokenTracker.update(input, output);
           break;
       }
@@ -722,7 +726,8 @@ export class ComposedHandler implements ModelHandler {
     // for zai@glm-* — the Anthropic SSE was then fed to the OpenAI parser and dropped.
     const streamFormat =
       this.provider.overrideStreamFormat?.() ??
-      (this.explicitAdapter?.getStreamFormat() ?? this.modelAdapter?.getStreamFormat()) ??
+      this.explicitAdapter?.getStreamFormat() ??
+      this.modelAdapter?.getStreamFormat() ??
       this.getAdapter().getStreamFormat();
     // Stream parsers receive bareModelName: it is used both as the middleware-identity
     // key (must match beforeRequest() / getActiveNames()) AND as the value echoed in
@@ -739,13 +744,16 @@ export class ComposedHandler implements ModelHandler {
           this.middlewareManager,
           onTokenUpdate,
           claudeRequest.tools,
-          toolNameMap
+          toolNameMap,
+          this.createClaudishUsageCallback("openai-chat-completions")
         );
 
       case "openai-responses-sse":
         return createResponsesStreamHandler(c, response, {
           modelName: this.bareModelName,
           onTokenUpdate,
+          onUsage: this.createClaudishUsageCallback("openai-responses"),
+          onCodexUsage: this.createCodexUsageCallback(),
           toolNameMap: adapter.getToolNameMap(),
         });
 
@@ -787,6 +795,58 @@ export class ComposedHandler implements ModelHandler {
   /** Expose token tracker for advanced use cases */
   getTokenTracker(): TokenTracker {
     return this.tokenTracker;
+  }
+
+  /**
+   * Build a safe codex-usage logger only for the OpenAI Codex provider.
+   */
+  private createCodexUsageCallback():
+    | ((event: { modelName: string; requestId?: string; usage: unknown }) => void)
+    | undefined {
+    if (this.provider.name !== "openai-codex") return undefined;
+
+    return (event) => {
+      try {
+        const auth = this.provider.getAuthMode?.() ?? "api-key";
+        writeCodexUsageFromOpenAIUsage({
+          rawUsage: event.usage,
+          model: event.modelName,
+          requestId: event.requestId,
+          provider: "openai-codex",
+          auth,
+          apiSurface: codexApiSurfaceForAuth(auth),
+        });
+      } catch (err) {
+        log(`[CodexUsage] Failed to write usage log: ${err}`);
+      }
+    };
+  }
+
+  /**
+   * Build a best-effort Claudish usage logger for every provider surface.
+   */
+  private createClaudishUsageCallback(
+    apiSurface: string
+  ): (event: { modelName: string; requestId?: string; usage: unknown }) => void {
+    return (event) => {
+      try {
+        const auth = this.provider.getAuthMode?.();
+        const resolvedApiSurface =
+          apiSurface === "openai-responses" && this.provider.name === "openai-codex"
+            ? codexApiSurfaceForAuth(auth ?? "api-key")
+            : apiSurface;
+        writeClaudishUsageFromProviderUsage({
+          rawUsage: event.usage,
+          model: event.modelName,
+          requestId: event.requestId,
+          provider: this.provider.name,
+          ...(auth ? { auth } : {}),
+          apiSurface: resolvedApiSurface,
+        });
+      } catch (err) {
+        log(`[ClaudishUsage] Failed to write usage log: ${err}`);
+      }
+    };
   }
 
   /** Fetch quota and update token tracker (non-blocking, best-effort) */

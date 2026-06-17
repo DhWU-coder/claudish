@@ -113,7 +113,7 @@ claudish --init
 
 ```bash
 # OpenAI Codex / ChatGPT Plus / Codex 账号
-claudish login openai-codex
+claudish login codex
 
 # Gemini
 claudish login gemini
@@ -187,6 +187,10 @@ claudish --debug --model cx@gpt-5.5 "复现这个错误"
 
 # 添加 OpenAI/Anthropic/Gemini 兼容 Provider
 claudish --set-provider
+
+# 打开配置界面
+claudish config
+claudish config --web
 ```
 
 ## 模型路由语法
@@ -491,7 +495,7 @@ export CLAUDE_PATH=/path/to/claude
 
 - OAuth 模型：先运行 `claudish login <provider>`
 - API Key 模型：检查对应环境变量或 `~/.claudish/config.json`
-- OpenAI Codex/ChatGPT OAuth：确认已登录 `claudish login openai-codex`
+- OpenAI Codex/ChatGPT OAuth：确认已登录 `claudish login codex`
 
 ### `Insufficient balance`
 

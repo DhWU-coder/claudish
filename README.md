@@ -305,6 +305,13 @@ claudish [OPTIONS] <claude-args...>
 | `--help` | `-h` | Show help message | |
 | `--` | | Everything after passes to Claude Code | |
 
+Configuration UIs:
+
+```bash
+claudish config        # Terminal TUI
+claudish config --web  # Local Web UI at 127.0.0.1
+```
+
 **Flag passthrough**: Any unrecognized flag is automatically forwarded to Claude Code (e.g., `--agent`, `--effort`, `--permission-mode`).
 
 ### Environment Variables

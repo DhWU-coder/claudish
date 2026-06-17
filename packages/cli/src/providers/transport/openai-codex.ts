@@ -47,11 +47,24 @@ function buildOAuthHeaders(token: string, accountId?: string): Record<string, st
 const CHATGPT_API_URL = "https://chatgpt.com/backend-api/codex";
 
 export class OpenAICodexTransport extends OpenAIProviderTransport {
+  private lastAuthMode = "api-key";
+
   override async getHeaders(): Promise<Record<string, string>> {
     const oauthHeaders = await this.tryOAuthHeaders();
-    if (oauthHeaders) return oauthHeaders;
+    if (oauthHeaders) {
+      this.lastAuthMode = "codex-oauth";
+      return oauthHeaders;
+    }
     // Fall back to API key auth
+    this.lastAuthMode = "api-key";
     return super.getHeaders();
+  }
+
+  /**
+   * Expose only the auth category for usage logs, never credential material.
+   */
+  getAuthMode(): string {
+    return this.lastAuthMode;
   }
 
   /**

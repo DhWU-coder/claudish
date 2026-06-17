@@ -37,6 +37,12 @@ export interface ProviderTransport {
   getHeaders(): Promise<Record<string, string>>;
 
   /**
+   * Return the auth mode used for the most recent request, for safe metadata
+   * logging. Implementations must not return tokens or secret values here.
+   */
+  getAuthMode?(): string;
+
+  /**
    * Override the adapter's stream format selection.
    * Only needed for aggregator providers (OpenRouter, LiteLLM) that normalize
    * response formats server-side, regardless of the underlying model.

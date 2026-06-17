@@ -1761,13 +1761,18 @@ PROFILE MANAGEMENT:
     --global  Target ~/.claudish/config.json (shared across projects)
     (omit)    Prompted interactively; suggests local if in a project directory
 
+CONFIGURATION:
+  claudish config                            Open the terminal configuration UI
+  claudish config --web                      Open a local browser configuration UI
+  claudish web                               Open a local browser configuration UI
+
 UPDATE:
   claudish update          Check for updates and install latest version
 
 AUTHENTICATION:
   claudish login [provider]   Login to an OAuth provider (interactive if no provider given)
   claudish logout [provider]  Clear OAuth credentials (interactive if no provider given)
-                              Providers: gemini, kimi
+                              Providers: gemini, kimi, codex
 
 MODEL MAPPING (per-role override):
   --model-opus <model>     Model for Opus role (planning, complex tasks)

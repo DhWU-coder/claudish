@@ -12,8 +12,20 @@
  */
 
 import type { Context } from "hono";
-import { log, getLogLevel } from "../../../logger.js";
+import { getLogLevel, log } from "../../../logger.js";
 import { wrapAnthropicError } from "../anthropic-error.js";
+
+/**
+ * Provider-returned token counters surfaced after a completed Responses stream.
+ */
+interface ProviderUsageEvent {
+  /** Bare model name used for the upstream call. */
+  modelName: string;
+  /** Provider request id when it is exposed in response headers or final events. */
+  requestId?: string;
+  /** Raw usage payload returned by the provider; callers normalize it later. */
+  usage: unknown;
+}
 
 export function createResponsesStreamHandler(
   c: Context,
@@ -21,6 +33,8 @@ export function createResponsesStreamHandler(
   opts: {
     modelName: string;
     onTokenUpdate?: (input: number, output: number) => void;
+    onUsage?: (event: ProviderUsageEvent) => void;
+    onCodexUsage?: (event: ProviderUsageEvent) => void;
     toolNameMap?: Map<string, string>;
   }
 ): Response {
@@ -36,6 +50,9 @@ export function createResponsesStreamHandler(
   let blockIndex = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let completedUsage: unknown;
+  let completedRequestId: string | undefined =
+    response.headers.get("x-request-id") ?? response.headers.get("openai-request-id") ?? undefined;
   let hasTextContent = false;
   let hasToolUse = false;
   let lastActivity = Date.now();
@@ -190,9 +207,12 @@ export function createResponsesStreamHandler(
                 }
               } else if (event.type === "response.completed" || event.type === "response.done") {
                 if (event.response?.usage) {
+                  completedUsage = event.response.usage;
+                  completedRequestId = event.response.id || completedRequestId;
                   inputTokens = event.response.usage.input_tokens || 0;
                   outputTokens = event.response.usage.output_tokens || 0;
                 } else if (event.usage) {
+                  completedUsage = event.usage;
                   inputTokens = event.usage.input_tokens || 0;
                   outputTokens = event.usage.output_tokens || 0;
                 }
@@ -262,6 +282,20 @@ export function createResponsesStreamHandler(
         send("message_stop", { type: "message_stop" });
 
         isClosed = true;
+        if (completedUsage) {
+          // All providers can write Claudish usage, while Codex keeps its
+          // separate codex-usage-compatible writer for the external tool.
+          opts.onUsage?.({
+            modelName: opts.modelName,
+            requestId: completedRequestId,
+            usage: completedUsage,
+          });
+          opts.onCodexUsage?.({
+            modelName: opts.modelName,
+            requestId: completedRequestId,
+            usage: completedUsage,
+          });
+        }
         if (opts.onTokenUpdate) opts.onTokenUpdate(inputTokens, outputTokens);
         controller.close();
       } catch (error) {

@@ -10,10 +10,10 @@
 import type { Context } from "hono";
 import { log } from "../../../logger.js";
 import {
-  validateAndRepairToolCall,
-  inferMissingParameters,
-  extractToolCallsFromText,
   type ToolSchema,
+  extractToolCallsFromText,
+  inferMissingParameters,
+  validateAndRepairToolCall,
 } from "../tool-call-recovery.js";
 import { isWebSearchToolCall, warnWebSearchUnsupported } from "../web-search-detector.js";
 
@@ -39,6 +39,18 @@ export interface ToolState {
   closed: boolean;
   arguments: string; // Accumulated JSON arguments string
   buffered: boolean; // Whether we're buffering args until tool call completes
+}
+
+/**
+ * Provider-returned token counters surfaced after a completed stream.
+ */
+export interface ProviderUsageEvent {
+  /** Bare model name used for the upstream call. */
+  modelName: string;
+  /** Provider request id when it is exposed in response headers. */
+  requestId?: string;
+  /** Raw usage payload returned by the provider; callers normalize it later. */
+  usage: unknown;
 }
 
 /**
@@ -107,7 +119,8 @@ export function createStreamingResponseHandler(
   middlewareManager: any,
   onTokenUpdate?: (input: number, output: number) => void,
   toolSchemas?: any[], // Tool schemas for validation
-  toolNameMap?: Map<string, string> // Truncated → original tool name mapping
+  toolNameMap?: Map<string, string>, // Truncated → original tool name mapping
+  onUsage?: (event: ProviderUsageEvent) => void
 ): Response {
   log(`[Streaming] ===== HANDLER STARTED for ${target} =====`);
   let isClosed = false;
@@ -115,6 +128,8 @@ export function createStreamingResponseHandler(
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const streamMetadata = new Map<string, any>();
+  const requestId =
+    response.headers.get("x-request-id") ?? response.headers.get("openai-request-id") ?? undefined;
 
   return c.body(
     new ReadableStream({
@@ -293,9 +308,21 @@ export function createStreamingResponseHandler(
             send("message_delta", {
               type: "message_delta",
               delta: { stop_reason: stopReason, stop_sequence: null },
-              usage: { output_tokens: state.usage?.completion_tokens || 0 },
+              usage: {
+                input_tokens: state.usage?.prompt_tokens ?? state.usage?.input_tokens ?? 0,
+                output_tokens: state.usage?.completion_tokens ?? state.usage?.output_tokens ?? 0,
+              },
             });
             send("message_stop", { type: "message_stop" });
+          }
+
+          // Persist only provider-returned usage; estimated counts stay status-line only.
+          if (state.usage && onUsage) {
+            try {
+              onUsage({ modelName: target, requestId, usage: state.usage });
+            } catch (usageError) {
+              log(`[Streaming] Usage callback failed: ${usageError}`);
+            }
           }
 
           // Update token counts - use actual usage if available, otherwise estimate
