@@ -12,14 +12,15 @@
  * Usage: claudish config
  */
 
-import { select, input, password, confirm } from "@inquirer/prompts";
+import { confirm, input, password, select } from "@inquirer/prompts";
+import { type CustomProviderSummary, getConfigEditorState } from "./config-editor.js";
 import {
   loadConfig,
+  removeApiKey,
+  removeEndpoint,
   saveConfig,
   setApiKey,
-  removeApiKey,
   setEndpoint,
-  removeEndpoint,
 } from "./profile-config.js";
 
 // ANSI colors (matches profile-commands.ts)
@@ -149,6 +150,17 @@ const PROVIDERS: ProviderDef[] = [
   },
 ];
 
+/**
+ * Format one custom provider row for the CLI config summary.
+ */
+export function formatCustomProviderLine(provider: CustomProviderSummary): string {
+  const type = provider.kind === "simple" ? provider.format : provider.transport || provider.kind;
+  const models = provider.models.length > 0 ? provider.models.join(", ") : "no models";
+  const modelCount = `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}`;
+  const defaultModel = provider.defaultModel ? `default ${provider.defaultModel}` : "no default";
+  return `  ${provider.id.padEnd(16)} ${type || "-"} · ${modelCount} · ${defaultModel} · ${models}`;
+}
+
 // ─── Helpers ─────────────────────────────────────────────
 
 /**
@@ -156,7 +168,7 @@ const PROVIDERS: ProviderDef[] = [
  */
 function maskKey(key: string): string {
   if (key.length <= 12) return "***";
-  return key.slice(0, 6) + "..." + key.slice(-4);
+  return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
 // ─── Connection Tests ─────────────────────────────────────
@@ -179,7 +191,7 @@ async function testProviderConnection(provider: ProviderDef, key: string): Promi
       headers = { Authorization: `Bearer ${key}` };
     } else if (provider.name === "litellm") {
       const config = loadConfig();
-      const baseUrl = config.endpoints?.["LITELLM_BASE_URL"] || process.env.LITELLM_BASE_URL;
+      const baseUrl = config.endpoints?.LITELLM_BASE_URL || process.env.LITELLM_BASE_URL;
       if (!baseUrl) {
         console.log(`${YELLOW}LiteLLM requires a base URL. Configure it in Providers.${RESET}`);
         return;
@@ -553,7 +565,7 @@ async function configRouting(): Promise<void> {
         if (config.routing) {
           delete config.routing[toRemove];
           if (Object.keys(config.routing).length === 0) {
-            delete config.routing;
+            config.routing = undefined;
           }
           saveConfig(config);
           console.log(`${GREEN}Routing rule removed.${RESET}`);
@@ -571,7 +583,7 @@ async function configRouting(): Promise<void> {
         default: false,
       });
       if (confirmed) {
-        delete config.routing;
+        config.routing = undefined;
         saveConfig(config);
         console.log(`${GREEN}All routing rules cleared.${RESET}`);
       }
@@ -653,7 +665,7 @@ ${DIM}Never collected: prompt content, AI responses, API keys, file paths.${RESE
       default: false,
     });
     if (confirmed && config.telemetry) {
-      delete config.telemetry.askedAt;
+      config.telemetry.askedAt = undefined;
       config.telemetry.enabled = false;
       saveConfig(config);
       console.log(`${GREEN}Telemetry consent reset.${RESET}`);
@@ -667,6 +679,7 @@ ${DIM}Never collected: prompt content, AI responses, API keys, file paths.${RESE
 
 function showCurrentConfig(): void {
   const config = loadConfig();
+  const editorState = getConfigEditorState();
 
   console.log(`\n${BOLD}Current Configuration${RESET}`);
   console.log(`${DIM}~/.claudish/config.json${RESET}\n`);
@@ -728,6 +741,16 @@ function showCurrentConfig(): void {
       console.log(
         `  ${p.displayName.padEnd(16)} ${GREEN}${envVal}${RESET} ${DIM}(env only)${RESET}`
       );
+    }
+    console.log("");
+  }
+
+  // Custom providers use provider@model routing, but each provider can expose
+  // multiple configured models for Web/CLI selection.
+  if (editorState.customProviders.length > 0) {
+    console.log(`${BOLD}Custom Providers${RESET}`);
+    for (const provider of editorState.customProviders) {
+      console.log(formatCustomProviderLine(provider));
     }
     console.log("");
   }

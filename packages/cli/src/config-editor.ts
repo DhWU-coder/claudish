@@ -32,6 +32,7 @@ export interface SimpleCustomProviderInput {
   baseUrl: string;
   apiKey: string;
   defaultModel?: string;
+  models?: string[] | string;
 }
 
 export interface CustomProviderSummary {
@@ -43,6 +44,7 @@ export interface CustomProviderSummary {
   baseUrl?: string;
   apiKey: string;
   defaultModel?: string;
+  models: string[];
   error?: string;
 }
 
@@ -164,6 +166,7 @@ export function saveSimpleCustomProvider(input: SimpleCustomProviderInput): Clau
   }
 
   const defaultModel = input.defaultModel?.trim() ?? "";
+  const models = normalizeProviderModels(input.models, defaultModel);
   config.customEndpoints = {
     ...(config.customEndpoints ?? {}),
     [providerId]: {
@@ -172,6 +175,7 @@ export function saveSimpleCustomProvider(input: SimpleCustomProviderInput): Clau
       format: input.format,
       apiKey: apiKey || existingApiKey,
       ...(defaultModel ? { defaultModel } : {}),
+      ...(models.length > 0 ? { models } : {}),
     },
   };
 
@@ -205,7 +209,7 @@ export function deleteCustomProvider(providerId: string): boolean {
  * Build a frontend-friendly snapshot of the current editable configuration.
  */
 export function getConfigEditorState(env: NodeJS.ProcessEnv = process.env): ConfigEditorState {
-  const config = loadConfig();
+  const config = migrateCustomProviderModels(loadConfig());
   const configDefaults = normalizeGeneralDefaults({
     defaultModel: config.defaultModel,
     defaultProvider: config.defaultProvider,
@@ -332,10 +336,9 @@ function buildModelOptions(config: ClaudishProfileConfig): string[] {
   // Put user-configured values first because they are most likely to be reused.
   addOption(options, config.defaultModel);
   for (const provider of summarizeCustomProviders(config)) {
-    addOption(
-      options,
-      provider.defaultModel ? `${provider.id}@${provider.defaultModel}` : undefined
-    );
+    for (const model of provider.models) {
+      addOption(options, `${provider.id}@${model}`);
+    }
   }
   for (const model of COMMON_MODEL_OPTIONS) {
     addOption(options, model);
@@ -356,7 +359,9 @@ function buildModelOptionsByProvider(config: ClaudishProfileConfig): Record<stri
 
   addProviderModelOptions(options, defaults.defaultProvider, defaults.defaultModel);
   for (const provider of summarizeCustomProviders(config)) {
-    addProviderModelOptions(options, provider.id, provider.defaultModel);
+    for (const model of provider.models) {
+      addProviderModelOptions(options, provider.id, model);
+    }
   }
   for (const value of COMMON_MODEL_OPTIONS) {
     const split = splitProviderModelSpec(value);
@@ -498,6 +503,7 @@ function summarizeSimpleCustomProvider(
   id: string,
   entry: Record<string, unknown>
 ): CustomProviderSummary {
+  const defaultModel = typeof entry.defaultModel === "string" ? entry.defaultModel : undefined;
   return {
     id,
     kind: "simple",
@@ -505,7 +511,8 @@ function summarizeSimpleCustomProvider(
     format: isCustomProviderFormat(entry.format) ? entry.format : undefined,
     baseUrl: typeof entry.url === "string" ? entry.url : undefined,
     apiKey: typeof entry.apiKey === "string" ? entry.apiKey : "",
-    defaultModel: typeof entry.defaultModel === "string" ? entry.defaultModel : undefined,
+    defaultModel,
+    models: normalizeProviderModels(entry.models, defaultModel),
   };
 }
 
@@ -524,6 +531,7 @@ function summarizeComplexCustomProvider(
     baseUrl: typeof entry.baseUrl === "string" ? entry.baseUrl : undefined,
     apiKey: typeof entry.apiKey === "string" ? entry.apiKey : "",
     defaultModel: undefined,
+    models: normalizeProviderModels(entry.models),
   };
 }
 
@@ -536,8 +544,91 @@ function invalidCustomProvider(id: string, apiKey: string, error: string): Custo
     kind: "invalid",
     displayName: id,
     apiKey,
+    models: [],
     error,
   };
+}
+
+/**
+ * Persist missing/dirty model lists so legacy one-model providers become the
+ * new explicit multi-model shape the first time the editor reads them.
+ */
+function migrateCustomProviderModels(config: ClaudishProfileConfig): ClaudishProfileConfig {
+  if (!config.customEndpoints) return config;
+
+  let changed = false;
+  const customEndpoints: Record<string, unknown> = {};
+  for (const [id, value] of Object.entries(config.customEndpoints)) {
+    if (!value || typeof value !== "object") {
+      customEndpoints[id] = value;
+      continue;
+    }
+
+    const entry = value as Record<string, unknown>;
+    const defaultModel = typeof entry.defaultModel === "string" ? entry.defaultModel : undefined;
+    const models = normalizeProviderModels(entry.models, defaultModel);
+    const normalizedEntry = { ...entry, ...(models.length > 0 ? { models } : {}) };
+
+    if (!sameStringArray(entry.models, models)) {
+      changed = true;
+      customEndpoints[id] = normalizedEntry;
+    } else {
+      customEndpoints[id] = value;
+    }
+  }
+
+  if (!changed) return config;
+  const migrated = { ...config, customEndpoints };
+  saveConfig(migrated);
+  return migrated;
+}
+
+/**
+ * Normalize provider model lists from JSON arrays or textarea strings while
+ * ensuring the default model is always selectable.
+ */
+function normalizeProviderModels(modelsInput?: unknown, defaultModel?: string): string[] {
+  const models = new Set<string>();
+  const defaultBareModel = bareProviderModel(defaultModel);
+  if (defaultBareModel) models.add(defaultBareModel);
+
+  for (const model of rawModelValues(modelsInput)) {
+    const bareModel = bareProviderModel(model);
+    if (bareModel) models.add(bareModel);
+  }
+
+  return [...models];
+}
+
+/**
+ * Accept either JSON arrays or newline/comma-separated form values from the UI.
+ */
+function rawModelValues(modelsInput?: unknown): string[] {
+  if (Array.isArray(modelsInput))
+    return modelsInput.filter((item): item is string => typeof item === "string");
+  if (typeof modelsInput === "string") return modelsInput.split(/[\n,]/);
+  return [];
+}
+
+/**
+ * Store provider-scoped model lists as bare model ids even if a user pastes
+ * provider@model into a form field.
+ */
+function bareProviderModel(model?: string): string {
+  const trimmed = model?.trim() ?? "";
+  if (!trimmed) return "";
+  return splitProviderModelSpec(trimmed)?.model || trimmed;
+}
+
+/**
+ * Compare a raw JSON models field to the normalized list for migration.
+ */
+function sameStringArray(raw: unknown, normalized: string[]): boolean {
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string"))
+    return normalized.length === 0;
+  return (
+    raw.length === normalized.length && raw.every((value, index) => value === normalized[index])
+  );
 }
 
 /**

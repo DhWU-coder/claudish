@@ -88,6 +88,7 @@ describe("config editor", () => {
       baseUrl: "https://llm.example.com/v1/",
       apiKey: "${CORP_OPENAI_KEY}",
       defaultModel: " gpt-4o ",
+      models: [" gpt-4o ", "gpt-4.1", "", "gpt-4o"],
     });
 
     expect(loadConfig().customEndpoints?.corp_openai).toEqual({
@@ -96,6 +97,23 @@ describe("config editor", () => {
       format: "openai",
       apiKey: "${CORP_OPENAI_KEY}",
       defaultModel: "gpt-4o",
+      models: ["gpt-4o", "gpt-4.1"],
+    });
+  });
+
+  test("saveSimpleCustomProvider migrates the default model into models", () => {
+    saveSimpleCustomProvider({
+      providerId: "corp-openai",
+      format: "openai",
+      baseUrl: "https://llm.example.com/v1",
+      apiKey: "secret",
+      defaultModel: "gpt-4o-mini",
+      models: ["gpt-4o"],
+    });
+
+    expect(loadConfig().customEndpoints?.["corp-openai"]).toMatchObject({
+      defaultModel: "gpt-4o-mini",
+      models: ["gpt-4o-mini", "gpt-4o"],
     });
   });
 
@@ -124,6 +142,32 @@ describe("config editor", () => {
       format: "anthropic",
       apiKey: "sk-existing",
       defaultModel: "claude-opus-4-7",
+      models: ["claude-opus-4-7"],
+    });
+  });
+
+  test("getConfigEditorState directly migrates legacy provider models", () => {
+    saveConfig({
+      version: "1.0.0",
+      defaultProfile: "default",
+      profiles: {},
+      customEndpoints: {
+        "corp-openai": {
+          kind: "simple",
+          url: "https://llm.example.com/v1",
+          format: "openai",
+          apiKey: "secret",
+          defaultModel: "gpt-4o",
+        },
+      },
+    });
+
+    const state = getConfigEditorState();
+
+    expect(state.customProviders[0]?.models).toEqual(["gpt-4o"]);
+    expect(loadConfig().customEndpoints?.["corp-openai"]).toMatchObject({
+      defaultModel: "gpt-4o",
+      models: ["gpt-4o"],
     });
   });
 
@@ -167,6 +211,7 @@ describe("config editor", () => {
           format: "openai",
           apiKey: "secret",
           defaultModel: "gpt-4o",
+          models: ["gpt-4o", "gpt-4.1"],
         },
       },
     });
@@ -185,6 +230,7 @@ describe("config editor", () => {
     });
     expect(state.customProviders).toHaveLength(1);
     expect(state.customProviders[0]?.id).toBe("corp-openai");
+    expect(state.customProviders[0]?.models).toEqual(["gpt-4o", "gpt-4.1"]);
   });
 
   test("getConfigEditorState groups bare model options by provider", () => {
@@ -203,6 +249,7 @@ describe("config editor", () => {
           format: "openai",
           apiKey: "secret",
           defaultModel: "gpt-4o",
+          models: ["gpt-4o", "gpt-4.1"],
         },
       },
     });
@@ -211,7 +258,7 @@ describe("config editor", () => {
 
     expect(state.modelOptionsByProvider.cx).toContain("gpt-5.5");
     expect(state.modelOptionsByProvider.cx).toContain("gpt-5-codex");
-    expect(state.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o"]);
+    expect(state.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o", "gpt-4.1"]);
     expect(state.modelOptionsByProvider.cx).not.toContain("cx@gpt-5.5");
   });
 });

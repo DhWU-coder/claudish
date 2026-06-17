@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "./profile-config.js";
-import { handleConfigWebRequest } from "./web-config-server.js";
+import { handleConfigWebRequest, startConfigWebServer } from "./web-config-server.js";
 
 const originalClaudishHome = process.env.CLAUDISH_HOME;
 let tempHome: string | undefined;
+let tempUsageRoot: string | undefined;
 
 beforeEach(() => {
   // The web handler writes through the real config layer, isolated per test.
@@ -22,6 +23,11 @@ afterEach(() => {
   if (tempHome) {
     rmSync(tempHome, { recursive: true, force: true });
     tempHome = undefined;
+  }
+
+  if (tempUsageRoot) {
+    rmSync(tempUsageRoot, { recursive: true, force: true });
+    tempUsageRoot = undefined;
   }
 });
 
@@ -39,15 +45,27 @@ describe("web config server", () => {
     expect(await response.text()).toContain("Claudish Config");
   });
 
-  test("GET / renders chat stream parsing with real newline delimiters", async () => {
+  test("GET /favicon.ico returns an empty success response", async () => {
+    const response = await handleConfigWebRequest(request("/favicon.ico"));
+
+    // Browsers request favicons automatically; a 204 keeps local verification
+    // console output free from harmless 404 noise.
+    expect(response.status).toBe(204);
+  });
+
+  test("GET / renders terminal websocket protocol helpers", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
 
-    // String.raw keeps backslashes, so the browser source must use single
-    // escaped newlines rather than literal backslash-n delimiters.
-    expect(html).toContain('buffer.split("\\n\\n")');
-    expect(html).toContain('eventText.split("\\n")');
-    expect(html).not.toContain('buffer.split("\\\\n\\\\n")');
+    // Terminal traffic uses xterm.js and WebSocket JSON envelopes for input
+    // and resize events instead of Claude-style SSE parsing.
+    expect(html).toContain("xterm@5.3.0");
+    expect(html).toContain("xterm-addon-fit");
+    expect(html).toContain("sendTerminalInput");
+    expect(html).toContain("sendTerminalResize");
+    expect(html).toContain('type: "input"');
+    expect(html).toContain('type: "resize"');
+    expect(html).not.toContain('buffer.split("\\n\\n")');
   });
 
   test("GET / renders provider editing as a modal with custom comboboxes", async () => {
@@ -86,6 +104,41 @@ describe("web config server", () => {
     expect(html).toContain("Show API key");
   });
 
+  test("GET / renders full-width tabs in usage-first order", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // The Web UI should use one wide shell for every tab, with Usage first.
+    expect(html).toContain("max-width: none");
+    expect(html).not.toContain("max-width: 1180px");
+    expect(html.indexOf('data-tab="usage"')).toBeLessThan(html.indexOf('data-tab="config"'));
+    expect(html.indexOf('data-tab="config"')).toBeLessThan(html.indexOf('data-tab="providers"'));
+    expect(html.indexOf('data-tab="providers"')).toBeLessThan(html.indexOf('data-tab="chat"'));
+    expect(html).toContain('<button class="tab active" data-tab="usage"');
+    expect(html).toContain('<section class="panel active" id="panel-usage"');
+  });
+
+  test("GET / renders provider model list editing controls", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Providers can expose more than one selectable model, so the modal uses a
+    // one-at-a-time model editor instead of a bulk textarea.
+    expect(html).toContain('id="provider-model-input"');
+    expect(html).toContain('id="provider-model-add"');
+    expect(html).toContain('id="provider-model-list"');
+    expect(html).toContain('data-i18n="providerModal.models"');
+    expect(html).toContain("renderProviderModelList");
+    expect(html).toContain("addProviderModel");
+    expect(html).toContain("removeProviderModel");
+    expect(html).toContain("collectProviderModels");
+    expect(html).toContain('"providers.modelCount"');
+    expect(html).toContain('"providerModal.addModel"');
+    expect(html).toContain('"providerModal.removeModel"');
+    expect(html).toContain('"providerModal.modelsHelp"');
+    expect(html).not.toContain('<textarea id="provider-models"');
+  });
+
   test("GET / renders theme toggle as a light dark icon button", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -100,20 +153,21 @@ describe("web config server", () => {
     expect(html).not.toContain(">Theme</button>");
   });
 
-  test("GET / renders a compact chat app layout", async () => {
+  test("GET / renders chat as an embedded claudish terminal", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
 
-    // Chat should behave like a real chat surface: a compact toolbar above the
-    // transcript, an empty state, and a sticky composer instead of a huge left
-    // settings card beside an empty box.
-    expect(html).toContain('class="chat-shell"');
-    expect(html).toContain('class="chat-toolbar"');
-    expect(html).toContain('class="chat-meta"');
-    expect(html).toContain('class="chat-empty"');
-    expect(html).toContain('class="composer-row"');
-    expect(html).toContain('data-i18n="chat.emptyTitle"');
-    expect(html).not.toContain("<h2>Chat Settings</h2>");
+    // The Chat tab now hosts a real claudish terminal over WebSocket instead
+    // of manually assembling Claude-compatible chat payloads in the browser.
+    expect(html).toContain('class="terminal-shell"');
+    expect(html).toContain('id="terminal-start"');
+    expect(html).toContain('id="terminal-stop"');
+    expect(html).toContain('id="terminal-frame"');
+    expect(html).toContain('id="terminal"');
+    expect(html).toContain("new Terminal");
+    expect(html).toContain("/api/terminal");
+    expect(html).not.toContain('class="messages"');
+    expect(html).not.toContain('id="chat-form"');
   });
 
   test("GET / renders chat as a viewport-fitted panel", async () => {
@@ -140,8 +194,17 @@ describe("web config server", () => {
     expect(html).toContain("applyLanguage");
     expect(html).toContain("toggleLanguage");
     expect(html).toContain('data-i18n="tabs.config"');
-    expect(html).toContain('data-i18n="chat.send"');
-    expect(html).toContain('data-i18n="chat.usage.none"');
+    expect(html).toContain('data-i18n="terminal.start"');
+    expect(html).toContain('data-i18n="terminal.disconnected"');
+    expect(html).toContain('"tabs.chat": "Chat"');
+    expect(
+      html.includes('"tabs.chat": "聊天"') || html.includes('"tabs.chat": "\\u804A\\u5929"')
+    ).toBe(true);
+    expect(html).toContain('"terminal.start": "Start Chat"');
+    expect(
+      html.includes('"terminal.start": "启动聊天"') ||
+        html.includes('"terminal.start": "\\u542F\\u52A8\\u804A\\u5929"')
+    ).toBe(true);
     expect(html).toContain('localStorage.setItem("claudish-language"');
     expect(html).toContain("navigator.language");
   });
@@ -158,15 +221,119 @@ describe("web config server", () => {
     expect(html).toContain("chatProviderEl.addEventListener");
   });
 
-  test("GET / renders chat usage status parsing and display", async () => {
+  test("GET / renders terminal status display", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
 
-    // The chat surface should show real provider usage when the stream includes
-    // message_delta.usage, without requiring a page refresh or usage-log import.
-    expect(html).toContain('id="chat-usage"');
-    expect(html).toContain("extractUsageDelta");
-    expect(html).toContain("renderChatUsage");
+    // Real claudish terminal sessions surface output in the terminal itself,
+    // while the toolbar only tracks connection lifecycle.
+    expect(html).toContain('id="terminal-status"');
+    expect(html).toContain("renderTerminalStatus");
+    expect(html).toContain("terminal.connecting");
+    expect(html).toContain("terminal.connected");
+    expect(html).not.toContain('id="chat-usage"');
+    expect(html).not.toContain("renderChatUsage");
+  });
+
+  test("GET / renders usage dashboard tab and client refresh logic", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Usage is its own read-only dashboard tab fed by the local JSONL API.
+    expect(html).toContain('data-tab="usage"');
+    expect(html).toContain('id="panel-usage"');
+    expect(html).toContain('id="usage-filter"');
+    expect(html).toContain('id="usage-summary"');
+    expect(html).toContain('id="usage-refresh"');
+    expect(html).toContain('id="usage-timeline"');
+    expect(html).toContain('id="usage-model-provider"');
+    expect(html).toContain("loadUsageDashboard");
+    expect(html).toContain("renderUsageDashboard");
+    expect(html).toContain("/api/usage");
+    expect(html).toContain("buildUsageQuery");
+    expect(html).toContain("renderTimelineDistribution");
+  });
+
+  test("GET / renders usage dashboard as reference-style stacked sections", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Project directories are long, so they must live in a full-width section
+    // below model distribution instead of a cramped three-column card.
+    expect(html).toContain('class="usage-main-grid"');
+    expect(html).toContain('class="usage-stacked-grid"');
+    expect(html).toContain('id="usage-providers"');
+    expect(html).toContain('id="usage-models"');
+    expect(html).toContain('id="usage-projects"');
+    expect(html).toContain("grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr)");
+    expect(html).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(html).toContain(".usage-list,");
+    expect(html).toContain("overflow: hidden");
+  });
+
+  test("GET / renders provider-colored stacked usage timeline", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Provider colors must be shared between the timeline segments and the
+    // provider distribution legend, so stacked bars are readable at a glance.
+    expect(html).toContain("const PROVIDER_COLORS");
+    expect(html).toContain("providerColor");
+    expect(html).toContain("timelineGridColumns");
+    expect(html).toContain("renderTimelineSegments");
+    expect(html).toContain('className = "usage-timeline-segment"');
+    expect(html).toContain('className = "usage-provider-dot"');
+    expect(html).toContain("usageTimelineEl.style.gridTemplateColumns");
+    expect(html).toContain("border-radius: 4px 4px 0 0");
+    expect(html).toContain("display: grid");
+    expect(html).not.toContain("border-radius: 999px");
+    expect(html).not.toContain("width: clamp(18px, 5vw, 34px)");
+  });
+
+  test("GET /api/usage returns the project-local usage dashboard", async () => {
+    tempUsageRoot = mkdtempSync(join(tmpdir(), "claudish-web-api-usage-"));
+    mkdirSync(join(tempUsageRoot, ".claudish-usage"), { recursive: true });
+    writeFileSync(
+      join(tempUsageRoot, ".claudish-usage", "usage.jsonl"),
+      `${JSON.stringify({
+        schema_version: "claudish-usage.project-log.v1",
+        timestamp: "2026-06-10T09:10:00.000Z",
+        provider: "cx",
+        model: "old-model",
+        cwd: "/repo/old",
+        api_surface: "chatgpt-codex-responses",
+        request_id: "old-usage",
+        usage: { total: 999, input: 900, cached: 0, output: 99, reasoning: 0 },
+      })}\n${JSON.stringify({
+        schema_version: "claudish-usage.project-log.v1",
+        timestamp: "2026-06-17T09:10:00.000Z",
+        provider: "cx",
+        model: "gpt-5.5",
+        cwd: "/repo/default",
+        api_surface: "chatgpt-codex-responses",
+        request_id: "req-usage",
+        usage: { total: 42, input: 20, cached: 5, output: 22, reasoning: 3 },
+      })}\n`
+    );
+
+    const response = await handleConfigWebRequest(
+      request(
+        "/api/usage?preset=recent&recentValue=1天&bucket=day&modelProvider=cx&now=2026-06-17T12%3A00%3A00.000Z"
+      ),
+      {
+        usageProjectRoot: tempUsageRoot,
+      }
+    );
+    const body = await response.json();
+
+    // The HTTP endpoint should expose the same aggregate shape as the service.
+    expect(response.status).toBe(200);
+    expect(body.totalRequests).toBe(1);
+    expect(body.totals.total).toBe(42);
+    expect(body.byProvider[0].name).toBe("cx");
+    expect(body.byModel[0].name).toBe("cx@gpt-5.5");
+    expect(body.timeline[0].key).toBe("2026-06-17");
+    expect(body.recent[0].requestId).toBe("req-usage");
   });
 
   test("GET /api/config includes model options from defaults and custom providers", async () => {
@@ -184,6 +351,7 @@ describe("web config server", () => {
           format: "openai",
           apiKey: "secret",
           defaultModel: "gpt-4o",
+          models: ["gpt-4o", "gpt-4.1"],
         },
       },
     });
@@ -194,7 +362,8 @@ describe("web config server", () => {
     expect(body.modelOptions).toContain("cx@gpt-5.5");
     expect(body.modelOptions).toContain("corp-openai@gpt-4o");
     expect(body.modelOptionsByProvider.cx).toContain("gpt-5.5");
-    expect(body.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o"]);
+    expect(body.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o", "gpt-4.1"]);
+    expect(body.customProviders[0].models).toEqual(["gpt-4o", "gpt-4.1"]);
   });
 
   test("POST /api/defaults persists default model and provider", async () => {
@@ -240,6 +409,7 @@ describe("web config server", () => {
           baseUrl: "https://llm.example.com/v1/",
           apiKey: "${CORP_OPENAI_KEY}",
           defaultModel: "gpt-4o",
+          models: "gpt-4o\ngpt-4.1\n",
         }),
       })
     );
@@ -251,6 +421,7 @@ describe("web config server", () => {
       format: "openai",
       apiKey: "${CORP_OPENAI_KEY}",
       defaultModel: "gpt-4o",
+      models: ["gpt-4o", "gpt-4.1"],
     });
   });
 
@@ -279,6 +450,7 @@ describe("web config server", () => {
           baseUrl: "https://new.example.com/v1",
           apiKey: "",
           defaultModel: "claude-opus-4-7",
+          models: "claude-opus-4-7\nclaude-sonnet-4-7",
         }),
       })
     );
@@ -290,6 +462,7 @@ describe("web config server", () => {
       format: "anthropic",
       apiKey: "sk-existing",
       defaultModel: "claude-opus-4-7",
+      models: ["claude-opus-4-7", "claude-sonnet-4-7"],
     });
   });
 
@@ -362,5 +535,45 @@ describe("web config server", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(await response.text()).toContain("hello");
+  });
+
+  test("terminal websocket starts claudish in the configured project directory", async () => {
+    const terminalCwd = mkdtempSync(join(tmpdir(), "claudish-terminal-cwd-"));
+    let capturedCwd: string | undefined;
+    const server = startConfigWebServer({
+      terminalWorkingDirectory: terminalCwd,
+      terminalSessionFactory: (options) => {
+        // Capturing cwd here proves the WebSocket launch path does not fall
+        // back to whichever business project launched the config UI.
+        capturedCwd = options.cwd;
+        options.onData("ready");
+        return {
+          pid: 123,
+          write() {},
+          resize() {},
+          kill() {},
+        };
+      },
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // A real browser connects over WebSocket, so the test exercises the
+        // same terminal startup path as the UI.
+        const socket = new WebSocket(
+          `ws://127.0.0.1:${server.port}/api/terminal?provider=cx&model=gpt-5.5`
+        );
+        socket.addEventListener("message", () => {
+          socket.close();
+          resolve();
+        });
+        socket.addEventListener("error", () => reject(new Error("terminal websocket failed")));
+      });
+
+      expect(capturedCwd).toBe(terminalCwd);
+    } finally {
+      server.stop(true);
+      rmSync(terminalCwd, { recursive: true, force: true });
+    }
   });
 });
