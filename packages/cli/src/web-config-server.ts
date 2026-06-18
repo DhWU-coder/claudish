@@ -5,6 +5,9 @@
  * controls. It edits the same shared config helpers used by the terminal TUI.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CodexOAuth } from "./auth/codex-oauth.js";
 import {
   type CustomProviderFormat,
@@ -15,6 +18,8 @@ import {
   saveGeneralDefaults,
   saveSimpleCustomProvider,
 } from "./config-editor.js";
+import type { CustomEndpointSimple } from "./config-schema.js";
+import { type ClaudishProfileConfig, loadConfig } from "./profile-config.js";
 import {
   type WebChatRequest,
   type WebChatService,
@@ -25,6 +30,7 @@ import {
   type WebTerminalSession,
   createPythonTerminalSession,
   parseTerminalSocketMessage,
+  resolveTerminalModelSpec,
 } from "./web-terminal-service.js";
 import { getUsageDashboard, resolveClaudishProjectRoot } from "./web-usage-service.js";
 
@@ -33,6 +39,40 @@ type OAuthLoginHandler = (providerId: string) => Promise<void>;
 
 /** Opens a URL in the user's browser, injectable so tests never launch apps. */
 type BrowserOpener = (url: string) => void;
+
+interface ProviderProbeRequestBody {
+  provider?: string;
+  model?: string;
+  providerConfig?: ProviderProbeConfig;
+}
+
+interface ProviderProbeConfig {
+  providerId?: unknown;
+  format?: unknown;
+  baseUrl?: unknown;
+  apiKey?: unknown;
+  defaultModel?: unknown;
+  models?: unknown;
+}
+
+interface ProviderProbeInput {
+  provider: string;
+  model: string;
+  modelSpec: string;
+  prompt: string;
+  cwd?: string;
+  providerConfig?: ProviderProbeConfig;
+}
+
+interface ProviderProbeResult {
+  ok: boolean;
+  latencyMs: number;
+  preview?: string;
+  error?: string;
+}
+
+/** Runs a tiny real provider/model probe, injectable so tests never call LLMs. */
+type ProviderProbeRunner = (input: ProviderProbeInput) => Promise<ProviderProbeResult>;
 
 interface TerminalSocketData {
   provider: string;
@@ -46,6 +86,7 @@ interface TerminalSocketData {
 export interface ConfigWebServerOptions {
   port?: number;
   chatService?: WebChatService;
+  providerProbeRunner?: ProviderProbeRunner;
   /** Whether to open the local Web UI after binding the server port. */
   openBrowser?: boolean;
   /** Browser opener used for tests or platform-specific launch behavior. */
@@ -58,6 +99,7 @@ export interface ConfigWebServerOptions {
 
 export interface ConfigWebRequestOptions {
   chatService?: WebChatService;
+  providerProbeRunner?: ProviderProbeRunner;
   oauthLogin?: OAuthLoginHandler;
   usageProjectRoot?: string;
 }
@@ -158,6 +200,13 @@ function handlePostRequest(
     return handleOAuthLoginPost(url, options.oauthLogin ?? loginOAuthProvider);
   }
 
+  if (url.pathname === "/api/provider-test") {
+    return handleProviderTestPost(
+      request,
+      options.providerProbeRunner ?? defaultProviderProbeRunner
+    );
+  }
+
   if (url.pathname === "/api/chat") {
     return handleChatPost(request, options.chatService ?? defaultChatService);
   }
@@ -211,6 +260,7 @@ export function startConfigWebServer(
 
       return handleConfigWebRequest(request, {
         chatService,
+        providerProbeRunner: options.providerProbeRunner,
         oauthLogin: options.oauthLogin,
         usageProjectRoot,
       });
@@ -470,6 +520,220 @@ function decodeCustomProviderSecretId(url: URL): string | undefined {
 async function handleChatPost(request: Request, chatService: WebChatService): Promise<Response> {
   const body = await readJson<WebChatRequest>(request);
   return ensureEventStreamResponse(await chatService.streamChat(body));
+}
+
+/**
+ * Run a tiny provider/model probe through the real claudish CLI path.
+ */
+async function handleProviderTestPost(
+  request: Request,
+  providerProbeRunner: ProviderProbeRunner
+): Promise<Response> {
+  const body = await readJson<ProviderProbeRequestBody>(request);
+  const provider = body.provider?.trim() ?? "";
+  const model = body.model?.trim() ?? "";
+  const startedAt = Date.now();
+
+  if (!provider || !model) {
+    return jsonResponse({ ok: false, error: "Choose a provider and model first.", latencyMs: 0 });
+  }
+
+  try {
+    const result = await providerProbeRunner({
+      provider,
+      model,
+      modelSpec: resolveTerminalModelSpec({ provider, model }),
+      prompt: "回我hi",
+      providerConfig: body.providerConfig,
+    });
+    return jsonResponse(result);
+  } catch (err) {
+    return jsonResponse({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
+ * Spawn a short-lived claudish command so model tests match terminal chat.
+ */
+async function defaultProviderProbeRunner(input: ProviderProbeInput): Promise<ProviderProbeResult> {
+  const startedAt = Date.now();
+  const probeHome = createProbeHomeIfNeeded(input);
+  const cleanup = () => {
+    // Temporary homes exist only to test unsaved provider edits.
+    if (probeHome) rmSync(probeHome, { recursive: true, force: true });
+  };
+
+  try {
+    const proc = Bun.spawn({
+      cmd: [
+        "claudish",
+        "--model",
+        input.modelSpec,
+        "--no-session-persistence",
+        "--quiet",
+        input.prompt,
+      ],
+      cwd: input.cwd ?? process.cwd(),
+      env: {
+        ...process.env,
+        ...(probeHome ? { CLAUDISH_HOME: probeHome } : {}),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdoutPromise = new Response(proc.stdout).text();
+    const stderrPromise = new Response(proc.stderr).text();
+    const exitResult = await waitForProbeExit(proc, 30_000);
+    const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+    const latencyMs = Date.now() - startedAt;
+
+    if (exitResult === "timeout") {
+      return { ok: false, latencyMs, error: "Probe timed out after 30s" };
+    }
+
+    if (exitResult !== 0) {
+      return { ok: false, latencyMs, error: compactProbeOutput(stderr || stdout) };
+    }
+
+    return { ok: true, latencyMs, preview: compactProbeOutput(stdout) };
+  } finally {
+    cleanup();
+  }
+}
+
+/**
+ * Wait for a probe process, killing it if the tiny request stalls.
+ */
+async function waitForProbeExit(
+  proc: ReturnType<typeof Bun.spawn>,
+  timeoutMs: number
+): Promise<number | "timeout"> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      proc.kill();
+      resolve("timeout");
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([proc.exited, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * Create a temporary CLAUDISH_HOME when the browser sends unsaved provider edits.
+ */
+function createProbeHomeIfNeeded(input: ProviderProbeInput): string | undefined {
+  const providerEntry = buildTemporaryProviderEntry(input);
+  if (!providerEntry) return undefined;
+
+  const config = loadConfig();
+  const tempHome = mkdtempSync(join(tmpdir(), "claudish-provider-test-"));
+  const tempConfig: ClaudishProfileConfig = {
+    ...config,
+    customEndpoints: {
+      ...(config.customEndpoints ?? {}),
+      [input.provider]: providerEntry,
+    },
+  };
+
+  // The temp config shadows only this child process via CLAUDISH_HOME.
+  writeFileSync(join(tempHome, "config.json"), JSON.stringify(tempConfig, null, 2), "utf-8");
+  return tempHome;
+}
+
+/**
+ * Convert the provider modal payload into a simple custom endpoint override.
+ */
+function buildTemporaryProviderEntry(input: ProviderProbeInput): CustomEndpointSimple | undefined {
+  const config = input.providerConfig;
+  if (!config) return undefined;
+
+  const format = stringField(config.format);
+  const baseUrl = stringField(config.baseUrl);
+  if (!isSimpleProviderFormat(format) || !baseUrl) return undefined;
+
+  const savedConfig = loadConfig();
+  const existingApiKey = existingCustomEndpointApiKey(savedConfig, input.provider);
+  const apiKey = stringField(config.apiKey) || existingApiKey;
+  if (!apiKey) return undefined;
+
+  const defaultModel = stringField(config.defaultModel) || input.model;
+  return {
+    kind: "simple",
+    url: baseUrl.replace(/\/+$/, ""),
+    format,
+    apiKey,
+    defaultModel,
+    models: normalizeProbeModels(config.models, defaultModel),
+  };
+}
+
+/**
+ * Read the existing key so masked-key edits can still test saved providers.
+ */
+function existingCustomEndpointApiKey(
+  config: ClaudishProfileConfig,
+  provider: string
+): string | undefined {
+  const endpoint = config.customEndpoints?.[provider];
+  if (!endpoint || typeof endpoint !== "object") return undefined;
+  const apiKey = (endpoint as Record<string, unknown>).apiKey;
+  return typeof apiKey === "string" && apiKey.trim() ? apiKey.trim() : undefined;
+}
+
+/**
+ * Accept only simple endpoint formats that custom provider routing can load.
+ */
+function isSimpleProviderFormat(value: string): value is CustomProviderFormat {
+  return value === "openai" || value === "anthropic" || value === "gemini";
+}
+
+/**
+ * Normalize model lists sent either as arrays or form-style newline strings.
+ */
+function normalizeProbeModels(modelsInput: unknown, defaultModel: string): string[] {
+  const values = Array.isArray(modelsInput)
+    ? modelsInput
+    : typeof modelsInput === "string"
+      ? modelsInput.split(/\r?\n/)
+      : [];
+  const models = values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+
+  if (defaultModel && !models.includes(defaultModel)) models.unshift(defaultModel);
+  return Array.from(new Set(models));
+}
+
+/**
+ * Extract a compact one-line message for model-row test status.
+ */
+function compactProbeOutput(text: string): string {
+  // Build the ANSI escape matcher without embedding an ESC literal in source.
+  const escapeChar = String.fromCharCode(27);
+  const ansiEscapePattern = new RegExp(`${escapeChar}\\[[0-9;?]*[ -/]*[@-~]`, "g");
+  const compact = text
+    .replace(ansiEscapePattern, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+  return (compact || "No output").slice(0, 240);
+}
+
+/**
+ * Safely coerce loose browser form fields into trimmed strings.
+ */
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /**
@@ -916,12 +1180,12 @@ function renderConfigPage(): string {
       .provider-model-list {
         display: grid;
         gap: 6px;
-        max-height: 150px;
+        max-height: min(420px, calc(100vh - 360px));
         overflow: auto;
       }
       .provider-model-row {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 34px;
+        grid-template-columns: minmax(0, 1fr) minmax(104px, auto) auto;
         gap: 8px;
         align-items: center;
         min-height: 34px;
@@ -934,6 +1198,29 @@ function renderConfigPage(): string {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .provider-model-test-status {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .provider-model-test-status.ok {
+        color: var(--accent-strong);
+      }
+      .provider-model-test-status.error {
+        color: var(--danger);
+      }
+      .provider-model-actions {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .provider-model-test {
+        min-width: 48px;
+        padding: 0 9px;
       }
       .provider-model-remove {
         width: 30px;
@@ -1001,7 +1288,7 @@ function renderConfigPage(): string {
         display: none;
       }
       .modal {
-        width: min(560px, 100%);
+        width: min(980px, calc(100vw - 44px));
         max-height: min(760px, calc(100vh - 44px));
         overflow: auto;
         border: 1px solid var(--line);
@@ -1021,6 +1308,22 @@ function renderConfigPage(): string {
       }
       .modal-body {
         padding: 16px;
+      }
+      /* Split provider credentials from model management on desktop. */
+      .provider-editor-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(320px, 1.05fr);
+        gap: 16px;
+        align-items: start;
+      }
+      .provider-editor-info,
+      .provider-editor-models {
+        display: grid;
+        gap: 12px;
+        min-width: 0;
+      }
+      .provider-editor-models {
+        min-height: 0;
       }
       .modal-actions {
         display: flex;
@@ -1242,46 +1545,137 @@ function renderConfigPage(): string {
         max-width: 100%;
         overflow: hidden;
       }
+      .usage-timeline-wrap {
+        position: relative;
+        min-width: 0;
+      }
       .usage-timeline {
-        display: grid;
-        align-items: end;
-        gap: 10px;
-        min-height: 260px;
+        position: relative;
+        height: 360px;
+        min-height: 320px;
         min-width: 0;
         max-width: 100%;
-        overflow-x: auto;
-        overflow-y: hidden;
+        overflow: hidden;
         border: 1px solid var(--line);
         border-radius: 6px;
         padding: 12px;
         background: var(--field);
       }
-      .usage-timeline-column {
-        display: grid;
-        grid-template-rows: minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: end;
+      .usage-timeline-frame {
+        position: relative;
+        height: 100%;
+        min-height: 0;
         min-width: 0;
       }
-      .usage-timeline-bar {
-        display: flex;
-        flex-direction: column-reverse;
-        align-items: end;
-        width: 100%;
-        min-height: 190px;
-        border-radius: 4px 4px 0 0;
-        overflow: hidden;
-        background: var(--line);
+      .usage-timeline-y-axis {
+        position: absolute;
+        top: 18px;
+        bottom: 36px;
+        left: 0;
+        width: 58px;
+        color: var(--muted);
+        font-size: 11px;
       }
-      .usage-timeline-segment {
+      .usage-timeline-axis-top,
+      .usage-timeline-axis-zero {
+        position: absolute;
+        right: 8px;
+        white-space: nowrap;
+      }
+      .usage-timeline-axis-top {
+        top: -5px;
+      }
+      .usage-timeline-axis-zero {
+        bottom: -4px;
+      }
+      .usage-timeline-plot {
+        position: absolute;
+        top: 18px;
+        right: 8px;
+        bottom: 36px;
+        left: 62px;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+      }
+      .usage-timeline-svg {
+        position: absolute;
+        inset: 0;
         display: block;
         width: 100%;
-        min-height: 2px;
+        height: 100%;
+      }
+      .usage-timeline-bar-segment {
+        shape-rendering: crispEdges;
+      }
+      .usage-timeline-bar-hit {
+        cursor: default;
+        outline: none;
+      }
+      .usage-timeline-bar-hit:focus-visible {
+        stroke: var(--accent);
+        stroke-width: 0.6;
+      }
+      .usage-timeline-tooltip {
+        position: absolute;
+        z-index: 20;
+        display: grid;
+        gap: 8px;
+        width: min(280px, calc(100% - 24px));
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        color: var(--text);
+        pointer-events: none;
+      }
+      .usage-timeline-tooltip[hidden] {
+        display: none;
+      }
+      .usage-tooltip-title {
+        font-weight: 700;
+      }
+      .usage-tooltip-grid,
+      .usage-tooltip-providers {
+        display: grid;
+        gap: 5px;
+      }
+      .usage-tooltip-row,
+      .usage-tooltip-provider {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+      }
+      .usage-tooltip-provider-name {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .usage-tooltip-provider-name code {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .usage-timeline-x-axis {
+        position: absolute;
+        right: 8px;
+        bottom: 0;
+        left: 62px;
+        height: 30px;
       }
       .usage-timeline-label {
+        position: absolute;
+        bottom: 0;
+        transform: translateX(-50%) rotate(-16deg);
+        transform-origin: top center;
         overflow: hidden;
+        max-width: 78px;
         color: var(--muted);
-        font-size: 10px;
+        font-size: 11px;
         text-align: center;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1363,6 +1757,13 @@ function renderConfigPage(): string {
         .usage-main-grid,
         .usage-stacked-grid,
         .usage-summary {
+          grid-template-columns: 1fr;
+        }
+        /* Collapse the provider editor to one column on narrow screens. */
+        .modal {
+          width: min(560px, calc(100vw - 24px));
+        }
+        .provider-editor-grid {
           grid-template-columns: 1fr;
         }
         .usage-panel-head {
@@ -1538,7 +1939,10 @@ function renderConfigPage(): string {
               <div class="usage-panel-head">
                 <h3 data-i18n="usage.timeline">Time Distribution</h3>
               </div>
-              <div class="usage-timeline" id="usage-timeline"></div>
+              <div class="usage-timeline-wrap">
+                <div class="usage-timeline" id="usage-timeline"></div>
+                <div class="usage-timeline-tooltip" id="usage-timeline-tooltip" hidden></div>
+              </div>
             </div>
             <div class="usage-block">
               <h3 data-i18n="usage.providerDistribution">Provider Distribution</h3>
@@ -1578,45 +1982,53 @@ function renderConfigPage(): string {
         </div>
         <div class="modal-body">
           <form id="provider-form">
-            <label>
-              <span data-i18n="providerModal.providerId">Provider ID</span>
-              <input id="provider-id" name="providerId" placeholder="corp-openai" required />
-            </label>
-            <label id="provider-format-field">
-              <span data-i18n="providerModal.compatibleType">Compatible type</span>
-              <div class="combo" data-combo="formats">
-                <input id="provider-format" name="format" value="openai" autocomplete="off" readonly />
-                <button class="combo-toggle" type="button" aria-label="Show compatible types" data-i18n-aria-label="aria.showCompatibleTypes"></button>
-                <div class="combo-menu" role="listbox"></div>
+            <div class="provider-editor-grid">
+              <!-- Provider connection fields stay together so OAuth modes can hide credentials cleanly. -->
+              <div class="provider-editor-info">
+                <label>
+                  <span data-i18n="providerModal.providerId">Provider ID</span>
+                  <input id="provider-id" name="providerId" placeholder="corp-openai" required />
+                </label>
+                <label id="provider-format-field">
+                  <span data-i18n="providerModal.compatibleType">Compatible type</span>
+                  <div class="combo" data-combo="formats">
+                    <input id="provider-format" name="format" value="openai" autocomplete="off" readonly />
+                    <button class="combo-toggle" type="button" aria-label="Show compatible types" data-i18n-aria-label="aria.showCompatibleTypes"></button>
+                    <div class="combo-menu" role="listbox"></div>
+                  </div>
+                </label>
+                <label id="provider-url-field">
+                  <span data-i18n="providerModal.baseUrl">Base URL</span>
+                  <input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" required />
+                </label>
+                <label id="provider-key-field">
+                  <span data-i18n="providerModal.apiKey">API key</span>
+                  <div class="secret-field">
+                    <input id="provider-key" name="apiKey" type="password" placeholder="sk-... or &#36;{ENV_VAR}" autocomplete="off" />
+                    <button class="secret-toggle" id="provider-key-toggle" type="button" aria-label="Show API key" data-i18n-aria-label="aria.showApiKey"></button>
+                  </div>
+                </label>
               </div>
-            </label>
-            <label id="provider-url-field">
-              <span data-i18n="providerModal.baseUrl">Base URL</span>
-              <input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" required />
-            </label>
-            <label id="provider-key-field">
-              <span data-i18n="providerModal.apiKey">API key</span>
-              <div class="secret-field">
-                <input id="provider-key" name="apiKey" type="password" placeholder="sk-... or &#36;{ENV_VAR}" autocomplete="off" />
-                <button class="secret-toggle" id="provider-key-toggle" type="button" aria-label="Show API key" data-i18n-aria-label="aria.showApiKey"></button>
+              <!-- Model controls live in their own column so long model lists do not crowd credentials. -->
+              <div class="provider-editor-models">
+                <label>
+                  <span data-i18n="providerModal.defaultModel">Default model</span>
+                  <div class="combo" data-combo="models">
+                    <input id="provider-model" name="defaultModel" placeholder="gpt-4o" autocomplete="off" />
+                    <button class="combo-toggle" type="button" aria-label="Show model options" data-i18n-aria-label="aria.showModelOptions"></button>
+                    <div class="combo-menu" role="listbox"></div>
+                  </div>
+                </label>
+                <div class="provider-model-editor">
+                  <span class="field-label" data-i18n="providerModal.models">Models</span>
+                  <div class="provider-model-add-row">
+                    <input id="provider-model-input" placeholder="gpt-4o" autocomplete="off" data-i18n-placeholder="providerModal.modelInputPlaceholder" />
+                    <button class="ghost model-add-button" id="provider-model-add" type="button" aria-label="Add model" title="Add model" data-i18n-aria-label="aria.addProviderModel" data-i18n-title="providerModal.addModel">+</button>
+                  </div>
+                  <div class="provider-model-list" id="provider-model-list"></div>
+                  <span class="field-help" data-i18n="providerModal.modelsHelp">Add one model at a time. The default model will be saved with the list.</span>
+                </div>
               </div>
-            </label>
-            <label>
-              <span data-i18n="providerModal.defaultModel">Default model</span>
-              <div class="combo" data-combo="models">
-                <input id="provider-model" name="defaultModel" placeholder="gpt-4o" autocomplete="off" />
-                <button class="combo-toggle" type="button" aria-label="Show model options" data-i18n-aria-label="aria.showModelOptions"></button>
-                <div class="combo-menu" role="listbox"></div>
-              </div>
-            </label>
-            <div class="provider-model-editor">
-              <span class="field-label" data-i18n="providerModal.models">Models</span>
-              <div class="provider-model-add-row">
-                <input id="provider-model-input" placeholder="gpt-4o" autocomplete="off" data-i18n-placeholder="providerModal.modelInputPlaceholder" />
-                <button class="ghost model-add-button" id="provider-model-add" type="button" aria-label="Add model" title="Add model" data-i18n-aria-label="aria.addProviderModel" data-i18n-title="providerModal.addModel">+</button>
-              </div>
-              <div class="provider-model-list" id="provider-model-list"></div>
-              <span class="field-help" data-i18n="providerModal.modelsHelp">One model per line. The default model will be added automatically.</span>
             </div>
             <div class="modal-actions">
               <button class="ghost" id="provider-login" type="button" data-i18n="providerModal.relogin" hidden>Relogin</button>
@@ -1636,6 +2048,7 @@ function renderConfigPage(): string {
       let editingProviderId = "";
       let editingProviderSource = "";
       let providerModelDraft = [];
+      let providerModelTestStates = new Map();
       let terminal = null;
       let terminalFitAddon = null;
       let terminalSocket = null;
@@ -1662,7 +2075,9 @@ function renderConfigPage(): string {
         "#b38cff",
         "#f59e42",
       ];
+      const SVG_NS = "http://www.w3.org/2000/svg";
       const CODEX_OAUTH_TYPE_LABEL = "Codex-Oauth";
+      const SECRET_MASK = "••••••••••••••••••••••••";
       const comboStates = new Map();
 
       // UI translations stay client-side so the config API remains unchanged.
@@ -1703,6 +2118,10 @@ function renderConfigPage(): string {
           "providerModal.modelInputPlaceholder": "model id",
           "providerModal.addModel": "Add model",
           "providerModal.removeModel": "Remove model",
+          "providerModal.testModel": "Test",
+          "providerModal.testingModel": "Testing...",
+          "providerModal.testSuccess": "OK {ms}ms",
+          "providerModal.testFailure": "Failed: {message}",
           "providerModal.emptyModels": "No models added yet.",
           "providerModal.modelsHelp": "Add one model at a time. The default model will be saved with the list.",
           "providerModal.relogin": "Relogin",
@@ -1714,10 +2133,12 @@ function renderConfigPage(): string {
           "terminal.provider": "Provider",
           "terminal.model": "Model",
           "terminal.start": "Start Chat",
+          "terminal.restart": "Restart Chat",
           "terminal.stop": "Stop",
           "terminal.default": "Default: {provider} / {model}",
           "terminal.disconnected": "Disconnected.",
           "terminal.connecting": "Starting claudish...",
+          "terminal.restarting": "Restarting claudish...",
           "terminal.connected": "Connected.",
           "terminal.closed": "Chat session closed.",
           "terminal.unavailable": "Chat terminal library failed to load.",
@@ -1779,6 +2200,7 @@ function renderConfigPage(): string {
           "aria.closeProviderEditor": "Close provider editor",
           "aria.addProviderModel": "Add model",
           "aria.removeProviderModel": "Remove model",
+          "aria.testProviderModel": "Test model",
         },
         zh: {
           "app.title": "Claudish 配置",
@@ -1816,6 +2238,10 @@ function renderConfigPage(): string {
           "providerModal.modelInputPlaceholder": "模型 ID",
           "providerModal.addModel": "添加模型",
           "providerModal.removeModel": "移除模型",
+          "providerModal.testModel": "测试",
+          "providerModal.testingModel": "测试中...",
+          "providerModal.testSuccess": "成功 {ms}ms",
+          "providerModal.testFailure": "失败：{message}",
           "providerModal.emptyModels": "还没有添加模型。",
           "providerModal.modelsHelp": "每次添加一个模型。默认模型会随列表一起保存。",
           "providerModal.relogin": "重新登录",
@@ -1827,10 +2253,12 @@ function renderConfigPage(): string {
           "terminal.provider": "Provider",
           "terminal.model": "模型",
           "terminal.start": "启动聊天",
+          "terminal.restart": "重启聊天",
           "terminal.stop": "停止",
           "terminal.default": "默认：{provider} / {model}",
           "terminal.disconnected": "未连接。",
           "terminal.connecting": "正在启动 claudish...",
+          "terminal.restarting": "正在重启 claudish...",
           "terminal.connected": "已连接。",
           "terminal.closed": "聊天会话已关闭。",
           "terminal.unavailable": "聊天终端库加载失败。",
@@ -1892,6 +2320,7 @@ function renderConfigPage(): string {
           "aria.closeProviderEditor": "关闭 Provider 编辑器",
           "aria.addProviderModel": "添加模型",
           "aria.removeProviderModel": "移除模型",
+          "aria.testProviderModel": "测试模型",
         },
       };
 
@@ -1936,6 +2365,7 @@ function renderConfigPage(): string {
       const usageRangeLabelEl = document.querySelector("#usage-range-label");
       const usageSummaryEl = document.querySelector("#usage-summary");
       const usageTimelineEl = document.querySelector("#usage-timeline");
+      const usageTimelineTooltipEl = document.querySelector("#usage-timeline-tooltip");
       const usageProvidersEl = document.querySelector("#usage-providers");
       const usageModelProviderEl = document.querySelector("#usage-model-provider");
       const usageModelsEl = document.querySelector("#usage-models");
@@ -2026,11 +2456,13 @@ function renderConfigPage(): string {
         const keyByState = {
           disconnected: "terminal.disconnected",
           connecting: "terminal.connecting",
+          restarting: "terminal.restarting",
           connected: "terminal.connected",
           closed: "terminal.closed",
           unavailable: "terminal.unavailable",
         };
         terminalStatusEl.textContent = t(keyByState[state] || "terminal.disconnected");
+        terminalStartEl.textContent = terminalSocket ? t("terminal.restart") : t("terminal.start");
       }
 
       // Activate one top-level panel at a time.
@@ -2278,6 +2710,7 @@ function renderConfigPage(): string {
           if (normalized) unique.add(normalized);
         }
         providerModelDraft = [...unique];
+        providerModelTestStates = new Map();
         renderProviderModelList();
       }
 
@@ -2297,6 +2730,7 @@ function renderConfigPage(): string {
       // Remove one model row and move the default model to a remaining value if needed.
       function removeProviderModel(model) {
         providerModelDraft = providerModelDraft.filter((item) => item !== model);
+        providerModelTestStates.delete(model);
         if (providerDefaultModelEl.value === model) {
           providerDefaultModelEl.value = providerModelDraft[0] || "";
         }
@@ -2335,6 +2769,19 @@ function renderConfigPage(): string {
         const code = document.createElement("code");
         code.textContent = model;
         code.title = model;
+        const status = document.createElement("span");
+        status.className = "provider-model-test-status";
+        renderProviderModelTestStatus(status, model);
+        const actions = document.createElement("div");
+        actions.className = "provider-model-actions";
+        const test = document.createElement("button");
+        test.type = "button";
+        test.className = "ghost provider-model-test";
+        test.textContent = t("providerModal.testModel");
+        test.disabled = providerModelTestStates.get(model)?.state === "testing";
+        test.setAttribute("aria-label", t("aria.testProviderModel") + ": " + model);
+        test.setAttribute("title", t("providerModal.testModel"));
+        test.addEventListener("click", () => testProviderModel(model));
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "ghost provider-model-remove";
@@ -2342,8 +2789,65 @@ function renderConfigPage(): string {
         remove.setAttribute("aria-label", t("aria.removeProviderModel") + ": " + model);
         remove.setAttribute("title", t("providerModal.removeModel"));
         remove.addEventListener("click", () => removeProviderModel(model));
-        row.append(code, remove);
+        actions.append(test, remove);
+        row.append(code, status, actions);
         return row;
+      }
+
+      // Render the last connectivity test result for a single model row.
+      function renderProviderModelTestStatus(status, model) {
+        const result = providerModelTestStates.get(model);
+        status.classList.remove("ok", "error");
+        if (!result) {
+          status.textContent = "";
+        } else if (result.state === "testing") {
+          status.textContent = t("providerModal.testingModel");
+        } else if (result.state === "ok") {
+          status.classList.add("ok");
+          status.textContent = t("providerModal.testSuccess", { ms: result.latencyMs });
+        } else {
+          status.classList.add("error");
+          status.textContent = t("providerModal.testFailure", { message: result.message });
+          status.title = result.message;
+        }
+      }
+
+      // Send a tiny real probe for the provider/model pair without saving the form.
+      async function testProviderModel(model) {
+        const providerId = providerIdEl.value.trim() || editingProviderId;
+        if (!providerId || !model) {
+          providerModelTestStates.set(model, {
+            state: "error",
+            message: "Missing provider or model",
+          });
+          renderProviderModelList();
+          return;
+        }
+
+        providerModelTestStates.set(model, { state: "testing" });
+        renderProviderModelList();
+        try {
+          const result = await requestJson("/api/provider-test", {
+            method: "POST",
+            body: JSON.stringify({
+              provider: providerId,
+              model,
+              providerConfig: normalizedProviderPayload(providerForm),
+            }),
+          });
+          providerModelTestStates.set(
+            model,
+            result.ok
+              ? { state: "ok", latencyMs: result.latencyMs ?? 0 }
+              : { state: "error", message: result.error || "Test failed" }
+          );
+        } catch (err) {
+          providerModelTestStates.set(model, {
+            state: "error",
+            message: err.message || String(err),
+          });
+        }
+        renderProviderModelList();
       }
 
       // Let the default-model dropdown prefer the provider's own model list.
@@ -2469,8 +2973,7 @@ function renderConfigPage(): string {
           (provider.authMode === "oauth" ? CODEX_OAUTH_TYPE_LABEL : provider.format || "openai");
         providerUrlEl.value = provider.baseUrl || "";
         resetProviderKeyVisibility();
-        providerKeyEl.value = "";
-        providerKeyEl.placeholder = t("providerModal.keepKey");
+        applyMaskedProviderKey(provider);
         providerDefaultModelEl.value = provider.defaultModel || "";
         setProviderModelDraft(provider.models?.length ? provider.models : [provider.defaultModel]);
         applyProviderModalMode(provider);
@@ -2489,7 +2992,33 @@ function renderConfigPage(): string {
         setProviderModelDraft([]);
         applyProviderModalMode(null);
         resetProviderKeyVisibility();
+        providerKeyEl.value = "";
         providerKeyEl.placeholder = "sk-... or $" + "{ENV_VAR}";
+      }
+
+      // Show a stable password-style mask for saved keys without exposing the secret.
+      function applyMaskedProviderKey(provider) {
+        if (provider?.apiKey) {
+          providerKeyEl.value = SECRET_MASK;
+          providerKeyEl.dataset.masked = "true";
+          providerKeyEl.placeholder = "";
+        } else {
+          providerKeyEl.value = "";
+          delete providerKeyEl.dataset.masked;
+          providerKeyEl.placeholder = t("providerModal.keepKey");
+        }
+      }
+
+      // Treat the synthetic mask as "keep existing key" when saving.
+      function isProviderKeyMasked() {
+        return providerKeyEl.dataset.masked === "true" && providerKeyEl.value === SECRET_MASK;
+      }
+
+      // Convert the provider form to an API payload without sending the mask string.
+      function normalizedProviderPayload(form) {
+        const payload = Object.fromEntries(new FormData(form));
+        if (isProviderKeyMasked()) payload.apiKey = "";
+        return payload;
       }
 
       // Switch the provider modal between custom, builtin, and OAuth-only modes.
@@ -2530,11 +3059,12 @@ function renderConfigPage(): string {
         }
 
         try {
-          if (editingProviderId && !providerKeyEl.value) {
+          if (editingProviderId && (!providerKeyEl.value || isProviderKeyMasked())) {
             const secret = await requestJson(
               "/api/custom-providers/" + encodeURIComponent(editingProviderId) + "/secret"
             );
             providerKeyEl.value = secret.apiKey || "";
+            delete providerKeyEl.dataset.masked;
           }
           providerKeyEl.type = "text";
           providerKeyToggle.classList.add("revealed");
@@ -2717,58 +3247,240 @@ function renderConfigPage(): string {
         ];
       }
 
-      // Render the timeline as a fixed-height bar chart that cannot widen cards.
+      // Render the timeline with a real plot area so bar heights match token ratios.
       function renderTimelineDistribution(timeline) {
         usageTimelineEl.replaceChildren();
-        usageTimelineEl.style.gridTemplateColumns = "";
+        hideTimelineTooltip();
         if (!timeline || timeline.length === 0) {
           usageTimelineEl.appendChild(usageEmptyState());
           return;
         }
 
-        usageTimelineEl.style.gridTemplateColumns = timelineGridColumns(timeline.length);
-        const maxTotal = Math.max(1, ...timeline.map((item) => item.usage.total));
-        for (const item of timeline) {
-          const column = document.createElement("div");
-          column.className = "usage-timeline-column";
-          column.title = item.key + " · " + formatUsageNumber(item.usage.total) + " tokens";
+        const maxTimelineTotal = Math.max(1, ...timeline.map((item) => item.usage.total));
+        const frame = document.createElement("div");
+        frame.className = "usage-timeline-frame";
 
-          const bar = document.createElement("div");
-          bar.className = "usage-timeline-bar";
-          bar.style.height = Math.max(6, Math.round((item.usage.total / maxTotal) * 100)) + "%";
-          renderTimelineSegments(bar, item);
+        const yAxis = document.createElement("div");
+        yAxis.className = "usage-timeline-y-axis";
+        yAxis.append(
+          createTimelineAxisLabel("usage-timeline-axis-top", timelineAxisLabel(maxTimelineTotal)),
+          createTimelineAxisLabel("usage-timeline-axis-zero", "0")
+        );
 
+        const plot = document.createElement("div");
+        plot.className = "usage-timeline-plot";
+        const svg = createTimelineSvg();
+        renderTimelineSvgBars(svg, timeline, maxTimelineTotal);
+        plot.appendChild(svg);
+
+        const xAxis = document.createElement("div");
+        xAxis.className = "usage-timeline-x-axis";
+        renderTimelineLabels(xAxis, timeline);
+
+        frame.append(yAxis, plot, xAxis);
+        usageTimelineEl.replaceChildren(frame);
+      }
+
+      // Show a custom tooltip immediately; native title bubbles are too slow
+      // and cannot display provider-colored token breakdowns.
+      function showTimelineTooltip(item, event) {
+        usageTimelineTooltipEl.replaceChildren(...timelineTooltipContent(item));
+        usageTimelineTooltipEl.hidden = false;
+        positionTimelineTooltip(event);
+      }
+
+      // Keep the tooltip inside the timeline wrapper while following the cursor.
+      function positionTimelineTooltip(event) {
+        if (usageTimelineTooltipEl.hidden) return;
+        const wrapper = usageTimelineTooltipEl.parentElement;
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const tooltipRect = usageTimelineTooltipEl.getBoundingClientRect();
+        const fallbackRect = event.currentTarget?.getBoundingClientRect?.() || wrapperRect;
+        const pointerX = typeof event.clientX === "number" ? event.clientX : fallbackRect.left;
+        const pointerY = typeof event.clientY === "number" ? event.clientY : fallbackRect.top;
+        const maxLeft = Math.max(12, wrapperRect.width - tooltipRect.width - 12);
+        const maxTop = Math.max(12, wrapperRect.height - tooltipRect.height - 12);
+        const left = Math.min(maxLeft, Math.max(12, pointerX - wrapperRect.left + 14));
+        const top = Math.min(maxTop, Math.max(12, pointerY - wrapperRect.top + 14));
+        usageTimelineTooltipEl.style.left = left + "px";
+        usageTimelineTooltipEl.style.top = top + "px";
+      }
+
+      // Hide and clear the timeline tooltip between hovers and data refreshes.
+      function hideTimelineTooltip() {
+        usageTimelineTooltipEl.hidden = true;
+        usageTimelineTooltipEl.replaceChildren();
+      }
+
+      // Build a rich tooltip from one timeline bucket without injecting HTML.
+      function timelineTooltipContent(item) {
+        const title = document.createElement("div");
+        title.className = "usage-tooltip-title";
+        title.textContent = item.key;
+        const metrics = document.createElement("div");
+        metrics.className = "usage-tooltip-grid";
+        for (const row of timelineTooltipMetricRows(item)) {
+          metrics.appendChild(usageTooltipRow(row.label, row.value));
+        }
+
+        const providers = document.createElement("div");
+        providers.className = "usage-tooltip-providers";
+        for (const provider of item.providers || []) {
+          providers.appendChild(usageTooltipProviderRow(provider));
+        }
+        return providers.childElementCount > 0 ? [title, metrics, providers] : [title, metrics];
+      }
+
+      // Convert timeline usage fields into localized tooltip rows.
+      function timelineTooltipMetricRows(item) {
+        return [
+          { label: t("usage.total"), value: formatUsageNumber(item.usage.total) },
+          { label: t("usage.input"), value: formatUsageNumber(item.usage.input) },
+          { label: t("usage.cached"), value: formatUsageNumber(item.usage.cached) },
+          { label: t("usage.output"), value: formatUsageNumber(item.usage.output) },
+          { label: t("usage.reasoning"), value: formatUsageNumber(item.usage.reasoning) },
+          { label: t("usage.requests"), value: formatUsageNumber(item.requests) },
+        ];
+      }
+
+      // Build one label/value row for the timeline tooltip.
+      function usageTooltipRow(labelText, valueText) {
+        const row = document.createElement("div");
+        row.className = "usage-tooltip-row";
+        const label = document.createElement("span");
+        label.className = "usage-meta";
+        label.textContent = labelText;
+        const value = document.createElement("strong");
+        value.textContent = valueText;
+        row.append(label, value);
+        return row;
+      }
+
+      // Build one provider row with the same color as timeline segments.
+      function usageTooltipProviderRow(provider) {
+        const row = document.createElement("div");
+        row.className = "usage-tooltip-provider";
+        const nameWrap = document.createElement("span");
+        nameWrap.className = "usage-tooltip-provider-name";
+        const dot = document.createElement("span");
+        dot.className = "usage-provider-dot";
+        dot.style.background = providerColor(provider.name);
+        const name = document.createElement("code");
+        name.textContent = provider.name;
+        name.title = provider.name;
+        const value = document.createElement("span");
+        value.className = "usage-meta";
+        value.textContent = t("usage.tokenCount", {
+          count: formatUsageNumber(provider.usage.total),
+        });
+        nameWrap.append(dot, name);
+        row.append(nameWrap, value);
+        return row;
+      }
+
+      // Provide keyboard users and assistive tech the same numbers as hover.
+      function timelineTooltipPlainText(item) {
+        const metrics = timelineTooltipMetricRows(item)
+          .map((row) => row.label + ": " + row.value)
+          .join(", ");
+        const providers = (item.providers || [])
+          .map((provider) => provider.name + ": " + formatUsageNumber(provider.usage.total))
+          .join(", ");
+        return [item.key, metrics, providers].filter(Boolean).join(" · ");
+      }
+
+      // Build a timeline SVG that scales bars but leaves labels in normal HTML.
+      function createTimelineSvg() {
+        const svg = document.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("class", "usage-timeline-svg");
+        svg.setAttribute("viewBox", "0 0 100 100");
+        svg.setAttribute("preserveAspectRatio", "none");
+        return svg;
+      }
+
+      // Draw stacked provider rects for each timeline bucket inside the plot.
+      function renderTimelineSvgBars(svg, timeline, maxTimelineTotal) {
+        const safeCount = Math.max(1, timeline.length);
+        const slotWidth = 100 / safeCount;
+        const barGapPercent = Math.min(16, Math.max(0.8, slotWidth * 0.18));
+        const barWidthPercent = Math.max(0.5, slotWidth - barGapPercent);
+
+        timeline.forEach((item, index) => {
+          const x = index * slotWidth + (slotWidth - barWidthPercent) / 2;
+          let cursorY = 100;
+          for (const provider of timelineProviders(item)) {
+            const rawHeightPercent =
+              (Number(provider.usage?.total || 0) / maxTimelineTotal) * 100;
+            if (rawHeightPercent <= 0) continue;
+
+            const segmentHeightPercent = Math.min(cursorY, Math.max(0.5, rawHeightPercent));
+            cursorY = Math.max(0, cursorY - segmentHeightPercent);
+            const segment = document.createElementNS(SVG_NS, "rect");
+            segment.setAttribute("class", "usage-timeline-bar-segment");
+            segment.setAttribute("x", chartNumber(x));
+            segment.setAttribute("y", chartNumber(cursorY));
+            segment.setAttribute("width", chartNumber(barWidthPercent));
+            segment.setAttribute("height", chartNumber(segmentHeightPercent));
+            segment.setAttribute("fill", providerColor(provider.name));
+            svg.appendChild(segment);
+          }
+
+          const hit = document.createElementNS(SVG_NS, "rect");
+          hit.setAttribute("class", "usage-timeline-bar-hit");
+          hit.setAttribute("x", chartNumber(index * slotWidth));
+          hit.setAttribute("y", "0");
+          hit.setAttribute("width", chartNumber(slotWidth));
+          hit.setAttribute("height", "100");
+          hit.setAttribute("fill", "transparent");
+          hit.setAttribute("pointer-events", "all");
+          hit.tabIndex = 0;
+          hit.setAttribute("aria-label", timelineTooltipPlainText(item));
+          hit.addEventListener("pointerenter", (event) => showTimelineTooltip(item, event));
+          hit.addEventListener("pointermove", (event) => positionTimelineTooltip(event));
+          hit.addEventListener("pointerleave", hideTimelineTooltip);
+          hit.addEventListener("focus", (event) => showTimelineTooltip(item, event));
+          hit.addEventListener("blur", hideTimelineTooltip);
+          svg.appendChild(hit);
+        });
+      }
+
+      // Reuse item totals when older records do not have provider breakdowns.
+      function timelineProviders(item) {
+        return item.providers?.length ? item.providers : [{ name: "unknown", usage: item.usage }];
+      }
+
+      // Keep SVG numbers short while preserving enough precision for dense charts.
+      function chartNumber(value) {
+        return String(Math.round(Number(value || 0) * 1000) / 1000);
+      }
+
+      // Create one y-axis label in the timeline frame.
+      function createTimelineAxisLabel(className, text) {
+        const label = document.createElement("span");
+        label.className = className;
+        label.textContent = text;
+        return label;
+      }
+
+      // Render a readable subset of x-axis labels below the SVG plot.
+      function renderTimelineLabels(axis, timeline) {
+        const step = timelineLabelStep(timeline.length);
+        timeline.forEach((item, index) => {
+          if (index % step !== 0 && index !== timeline.length - 1) return;
           const label = document.createElement("span");
           label.className = "usage-timeline-label";
+          label.style.left = ((index + 0.5) / Math.max(1, timeline.length)) * 100 + "%";
           label.textContent = timelineLabel(item.key);
-          column.append(bar, label);
-          usageTimelineEl.appendChild(column);
-        }
+          label.title = item.key;
+          axis.appendChild(label);
+        });
       }
 
-      // Let sparse timelines fill the chart while dense timelines remain readable.
-      function timelineGridColumns(count) {
-        const safeCount = Math.max(1, Number(count) || 1);
-        const minWidth = safeCount > 45 ? "18px" : "0";
-        return "repeat(" + safeCount + ", minmax(" + minWidth + ", 1fr))";
-      }
-
-      // Fill one timeline bar with provider-colored proportional segments.
-      function renderTimelineSegments(bar, item) {
-        const providers = item.providers?.length
-          ? item.providers
-          : [{ name: "unknown", usage: item.usage }];
-        for (const provider of providers) {
-          const segment = document.createElement("span");
-          segment.className = "usage-timeline-segment";
-          segment.style.height =
-            Math.max(3, Math.round((provider.usage.total / Math.max(1, item.usage.total)) * 100)) +
-            "%";
-          segment.style.background = providerColor(provider.name);
-          segment.title =
-            provider.name + " · " + formatUsageNumber(provider.usage.total) + " tokens";
-          bar.appendChild(segment);
-        }
+      // Thin x-axis labels as the number of buckets grows.
+      function timelineLabelStep(count) {
+        if (count <= 12) return 1;
+        if (count <= 45) return Math.ceil(count / 12);
+        return Math.ceil(count / 16);
       }
 
       // Rebuild the model-provider selector from the current filtered dataset.
@@ -2903,6 +3615,20 @@ function renderConfigPage(): string {
         return Number(value || 0).toLocaleString(currentLanguage === "zh" ? "zh-CN" : "en-US");
       }
 
+      // Format the timeline y-axis using compact suffixes like the reference dashboard.
+      function timelineAxisLabel(value) {
+        const number = Number(value || 0);
+        if (number >= 1_000_000_000) return trimAxisNumber(number / 1_000_000_000) + "B";
+        if (number >= 1_000_000) return trimAxisNumber(number / 1_000_000) + "M";
+        if (number >= 1_000) return trimAxisNumber(number / 1_000) + "K";
+        return formatUsageNumber(number);
+      }
+
+      // Remove unhelpful trailing zeros from compact axis labels.
+      function trimAxisNumber(value) {
+        return value.toFixed(2).replace(/\.?0+$/, "");
+      }
+
       // Format timestamps compactly while tolerating old or malformed rows.
       function formatUsageDate(timestamp) {
         const date = new Date(timestamp);
@@ -2965,7 +3691,7 @@ function renderConfigPage(): string {
         event.preventDefault();
         const form = event.currentTarget;
         const wasEditing = Boolean(editingProviderId);
-        const payload = Object.fromEntries(new FormData(form));
+        const payload = normalizedProviderPayload(form);
         payload.models = collectProviderModels(payload.defaultModel);
         const endpoint =
           editingProviderSource === "builtin" && editingProviderId
@@ -3053,41 +3779,49 @@ function renderConfigPage(): string {
         return protocol + "//" + window.location.host + "/api/terminal?" + params.toString();
       }
 
-      // Start a real claudish session behind the browser terminal.
-      function startTerminalSession() {
+      // Start or restart a real claudish session behind the browser terminal.
+      async function startTerminalSession() {
         if (!ensureTerminal()) return;
-        stopTerminalSession(false);
+        await restartTerminalSession();
+      }
+
+      // Close any existing terminal before opening a fresh provider/model session.
+      async function restartTerminalSession() {
+        const isRestarting = Boolean(terminalSocket);
+        if (isRestarting) {
+          renderTerminalStatus("restarting");
+          await closeTerminalSocket(false);
+        }
         terminal.clear();
         renderTerminalStatus("connecting");
         terminalStartEl.disabled = true;
         terminalStopEl.disabled = false;
 
         try {
-          terminalSocket = new WebSocket(terminalSocketUrl());
-          terminalSocket.binaryType = "arraybuffer";
-          terminalSocket.onopen = () => {
+          const socket = new WebSocket(terminalSocketUrl());
+          terminalSocket = socket;
+          socket.binaryType = "arraybuffer";
+          socket.onopen = () => {
+            if (terminalSocket !== socket) return;
             renderTerminalStatus("connected");
             setStatus(t("status.terminalStarted"));
             fitTerminalSoon();
             terminal.focus();
           };
-          terminalSocket.onmessage = (event) => {
+          socket.onmessage = (event) => {
+            if (terminalSocket !== socket) return;
             if (event.data instanceof ArrayBuffer) {
               terminal.write(new Uint8Array(event.data));
             } else {
               terminal.write(String(event.data));
             }
           };
-          terminalSocket.onerror = () => {
+          socket.onerror = () => {
+            if (terminalSocket !== socket) return;
             renderTerminalStatus("closed");
             setStatus(t("error.terminalStart"), true);
           };
-          terminalSocket.onclose = () => {
-            terminalSocket = null;
-            terminalStartEl.disabled = false;
-            terminalStopEl.disabled = true;
-            renderTerminalStatus("closed");
-          };
+          socket.onclose = () => finalizeTerminalClose(socket, false);
         } catch (err) {
           terminalSocket = null;
           terminalStartEl.disabled = false;
@@ -3098,12 +3832,35 @@ function renderConfigPage(): string {
       }
 
       // Stop the current claudish terminal session from the browser side.
-      function stopTerminalSession(showStatus = true) {
-        if (!terminalSocket) return;
-        if (terminalSocket.readyState === WebSocket.OPEN) {
-          terminalSocket.send(JSON.stringify({ type: "close" }));
-        }
-        terminalSocket.close();
+      async function stopTerminalSession(showStatus = true) {
+        await closeTerminalSocket(showStatus);
+      }
+
+      // Close the active WebSocket and resolve only after its close callback runs.
+      function closeTerminalSocket(showStatus = true) {
+        const socket = terminalSocket;
+        if (!socket) return Promise.resolve();
+
+        return new Promise((resolve) => {
+          socket.onclose = () => {
+            finalizeTerminalClose(socket, showStatus);
+            resolve();
+          };
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "close" }));
+          }
+          if (socket.readyState === WebSocket.CLOSED) {
+            finalizeTerminalClose(socket, showStatus);
+            resolve();
+          } else {
+            socket.close();
+          }
+        });
+      }
+
+      // Ignore late close events from old sockets after a restart opened a new one.
+      function finalizeTerminalClose(socket, showStatus) {
+        if (terminalSocket !== socket) return;
         terminalSocket = null;
         terminalStartEl.disabled = false;
         terminalStopEl.disabled = true;

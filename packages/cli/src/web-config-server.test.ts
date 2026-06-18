@@ -110,6 +110,21 @@ describe("web config server", () => {
     expect(html).not.toContain('list="provider-options"');
   });
 
+  test("GET / renders provider editor as a wide two-column modal", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Provider credentials and model management should sit side by side on
+    // desktop while keeping the model list independently scrollable.
+    expect(html).toContain("width: min(980px, calc(100vw - 44px))");
+    expect(html).toContain('class="provider-editor-grid"');
+    expect(html).toContain('class="provider-editor-info"');
+    expect(html).toContain('class="provider-editor-models"');
+    expect(html).toContain("grid-template-columns: minmax(0, 0.95fr) minmax(320px, 1.05fr)");
+    expect(html).toContain("max-height: min(420px, calc(100vh - 360px))");
+    expect(html).toContain("@media (max-width: 760px)");
+  });
+
   test("GET / renders CSS chevrons and an API key visibility control", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -125,6 +140,10 @@ describe("web config server", () => {
     expect(html).toContain('id="provider-key-toggle"');
     expect(html).toContain('type="password"');
     expect(html).toContain("Show API key");
+    expect(html).toContain("SECRET_MASK");
+    expect(html).toContain("applyMaskedProviderKey");
+    expect(html).toContain("isProviderKeyMasked");
+    expect(html).toContain("normalizedProviderPayload");
   });
 
   test("GET / renders full-width tabs in usage-first order", async () => {
@@ -154,11 +173,21 @@ describe("web config server", () => {
     expect(html).toContain("renderProviderModelList");
     expect(html).toContain("addProviderModel");
     expect(html).toContain("removeProviderModel");
+    expect(html).toContain("testProviderModel");
+    expect(html).toContain("provider-model-test");
+    expect(html).toContain("/api/provider-test");
     expect(html).toContain("collectProviderModels");
     expect(html).toContain('"providers.modelCount"');
     expect(html).toContain('"providerModal.addModel"');
     expect(html).toContain('"providerModal.removeModel"');
+    expect(html).toContain('"providerModal.testModel"');
+    expect(html).toContain('"providerModal.testSuccess"');
+    expect(html).toContain('"providerModal.testFailure"');
     expect(html).toContain('"providerModal.modelsHelp"');
+    expect(html).toContain(
+      "Add one model at a time. The default model will be saved with the list."
+    );
+    expect(html).not.toContain("One model per line");
     expect(html).not.toContain('<textarea id="provider-models"');
   });
 
@@ -210,6 +239,19 @@ describe("web config server", () => {
     expect(html).toContain("/api/terminal");
     expect(html).not.toContain('class="messages"');
     expect(html).not.toContain('id="chat-form"');
+  });
+
+  test("GET / renders terminal restart behavior for model changes", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Starting while a terminal is already connected should close the old
+    // socket before opening a new claudish session for the selected model.
+    expect(html).toContain('"terminal.restart": "Restart Chat"');
+    expect(html).toContain('"terminal.restarting": "Restarting claudish..."');
+    expect(html).toContain("restartTerminalSession");
+    expect(html).toContain("closeTerminalSocket");
+    expect(html).toContain("if (terminalSocket !== socket) return");
   });
 
   test("GET / renders chat as a viewport-fitted panel", async () => {
@@ -321,15 +363,56 @@ describe("web config server", () => {
     // provider distribution legend, so stacked bars are readable at a glance.
     expect(html).toContain("const PROVIDER_COLORS");
     expect(html).toContain("providerColor");
-    expect(html).toContain("timelineGridColumns");
-    expect(html).toContain("renderTimelineSegments");
-    expect(html).toContain('className = "usage-timeline-segment"');
+    expect(html).toContain("createTimelineSvg");
+    expect(html).toContain("renderTimelineSvgBars");
+    expect(html).toContain('className = "usage-timeline-frame"');
+    expect(html).toContain('className = "usage-timeline-plot"');
+    expect(html).toContain('className = "usage-timeline-y-axis"');
+    expect(html).toContain('svg.setAttribute("class", "usage-timeline-svg")');
+    expect(html).toContain('createElementNS(SVG_NS, "rect")');
+    expect(html).toContain("barWidthPercent");
+    expect(html).toContain("segmentHeightPercent");
+    expect(html).toContain('segment.setAttribute("fill", providerColor(provider.name))');
     expect(html).toContain('className = "usage-provider-dot"');
-    expect(html).toContain("usageTimelineEl.style.gridTemplateColumns");
-    expect(html).toContain("border-radius: 4px 4px 0 0");
-    expect(html).toContain("display: grid");
+    expect(html).toContain("usageTimelineEl.replaceChildren(frame)");
+    expect(html).toContain(".usage-timeline-plot");
     expect(html).not.toContain("border-radius: 999px");
     expect(html).not.toContain("width: clamp(18px, 5vw, 34px)");
+  });
+
+  test("GET / renders timeline bars against a real chart axis instead of fixed-height rows", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // The timeline should scale each bucket against the max token bucket inside
+    // a plot area, with axis labels that make the height difference readable.
+    expect(html).toContain("maxTimelineTotal");
+    expect(html).toContain("timelineAxisLabel");
+    expect(html).toContain("usage-timeline-axis-top");
+    expect(html).toContain("usage-timeline-axis-zero");
+    expect(html).toContain("usage-timeline-bar-hit");
+    expect(html).toContain("Math.max(0.5,");
+    expect(html).toContain("Math.min(16,");
+    expect(html).not.toContain("min-height: 190px");
+    expect(html).not.toContain("usageTimelineEl.style.gridTemplateColumns");
+  });
+
+  test("GET / renders usage timeline hover tooltip with provider breakdown", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // Timeline bars need an immediate custom tooltip because native title
+    // bubbles are delayed and do not show the provider breakdown clearly.
+    expect(html).toContain('id="usage-timeline-tooltip"');
+    expect(html).toContain("showTimelineTooltip");
+    expect(html).toContain("hideTimelineTooltip");
+    expect(html).toContain("timelineTooltipContent");
+    expect(html).toContain("positionTimelineTooltip");
+    expect(html).toContain('className = "usage-tooltip-provider"');
+    expect(html).toContain('hit.addEventListener("pointerenter"');
+    expect(html).toContain('hit.addEventListener("focus"');
+    expect(html).toContain("hit.tabIndex = 0");
+    expect(html).toContain('hit.setAttribute("aria-label"');
   });
 
   test("GET /api/usage returns the project-local usage dashboard", async () => {
@@ -732,6 +815,94 @@ describe("web config server", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(await response.text()).toContain("hello");
+  });
+
+  test("POST /api/provider-test probes through claudish CLI with provider-prefixed model", async () => {
+    let capturedProvider = "";
+    let capturedModel = "";
+    let capturedModelSpec = "";
+    let capturedPrompt = "";
+    let capturedProviderConfig: unknown;
+    const response = await handleConfigWebRequest(
+      request("/api/provider-test", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "tokenhub",
+          model: "claude-opus-4-7-thinking",
+          providerConfig: {
+            providerId: "tokenhub",
+            format: "openai",
+            baseUrl: "https://tokenhub.example.com/v1",
+            apiKey: "sk-test",
+            defaultModel: "claude-opus-4-7-thinking",
+            models: ["claude-opus-4-7-thinking"],
+          },
+        }),
+      }),
+      {
+        // This chatService prevents accidental network work while proving the
+        // provider test no longer relies on the browser chat proxy path.
+        chatService: {
+          streamChat: () => new Response("chat-service should not be used", { status: 500 }),
+        },
+        // The test runner stands in for the real claudish child process.
+        providerProbeRunner: async (input) => {
+          capturedProvider = input.provider;
+          capturedModel = input.model;
+          capturedModelSpec = input.modelSpec;
+          capturedPrompt = input.prompt;
+          capturedProviderConfig = input.providerConfig;
+          return { ok: true, latencyMs: 12, preview: "hi" };
+        },
+      }
+    );
+    const body = await response.json();
+
+    // The connectivity test must exercise the same CLI model spec as the
+    // terminal chat while keeping the prompt intentionally tiny.
+    expect(response.status).toBe(200);
+    expect(capturedProvider).toBe("tokenhub");
+    expect(capturedModel).toBe("claude-opus-4-7-thinking");
+    expect(capturedModelSpec).toBe("tokenhub@claude-opus-4-7-thinking");
+    expect(capturedPrompt).toBe("回我hi");
+    expect(capturedProviderConfig).toEqual({
+      providerId: "tokenhub",
+      format: "openai",
+      baseUrl: "https://tokenhub.example.com/v1",
+      apiKey: "sk-test",
+      defaultModel: "claude-opus-4-7-thinking",
+      models: ["claude-opus-4-7-thinking"],
+    });
+    expect(body.ok).toBe(true);
+    expect(body.preview).toContain("hi");
+    expect(body.latencyMs).toBe(12);
+  });
+
+  test("POST /api/provider-test returns CLI probe failures", async () => {
+    const response = await handleConfigWebRequest(
+      request("/api/provider-test", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "tokenhub",
+          model: "broken-model",
+        }),
+      }),
+      {
+        // A failing runner mirrors a claudish single-shot process that exits
+        // non-zero or times out.
+        providerProbeRunner: async () => ({
+          ok: false,
+          latencyMs: 30,
+          error: "model failed",
+        }),
+      }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("model failed");
+    expect(body.latencyMs).toBe(30);
   });
 
   test("startConfigWebServer opens the local Web UI when requested", () => {
