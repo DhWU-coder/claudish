@@ -5,11 +5,13 @@
  * controls. It edits the same shared config helpers used by the terminal TUI.
  */
 
+import { CodexOAuth } from "./auth/codex-oauth.js";
 import {
   type CustomProviderFormat,
   deleteCustomProvider,
   getConfigEditorState,
   getCustomProviderSecret,
+  saveBuiltinProviderModels,
   saveGeneralDefaults,
   saveSimpleCustomProvider,
 } from "./config-editor.js";
@@ -27,6 +29,7 @@ import {
 import { getUsageDashboard, resolveClaudishProjectRoot } from "./web-usage-service.js";
 
 type TerminalSessionFactory = (options: CreatePythonTerminalSessionOptions) => WebTerminalSession;
+type OAuthLoginHandler = (providerId: string) => Promise<void>;
 
 interface TerminalSocketData {
   provider: string;
@@ -40,6 +43,7 @@ interface TerminalSocketData {
 export interface ConfigWebServerOptions {
   port?: number;
   chatService?: WebChatService;
+  oauthLogin?: OAuthLoginHandler;
   terminalSessionFactory?: TerminalSessionFactory;
   terminalWorkingDirectory?: string;
   usageProjectRoot?: string;
@@ -47,6 +51,7 @@ export interface ConfigWebServerOptions {
 
 export interface ConfigWebRequestOptions {
   chatService?: WebChatService;
+  oauthLogin?: OAuthLoginHandler;
   usageProjectRoot?: string;
 }
 
@@ -138,6 +143,14 @@ function handlePostRequest(
     return handleCustomProviderPost(request);
   }
 
+  if (url.pathname.startsWith("/api/builtin-providers/")) {
+    return handleBuiltinProviderPost(request, url);
+  }
+
+  if (url.pathname.startsWith("/api/oauth-login/")) {
+    return handleOAuthLoginPost(url, options.oauthLogin ?? loginOAuthProvider);
+  }
+
   if (url.pathname === "/api/chat") {
     return handleChatPost(request, options.chatService ?? defaultChatService);
   }
@@ -189,7 +202,11 @@ export function startConfigWebServer(
         return upgraded ? undefined : jsonResponse({ error: "WebSocket upgrade failed" }, 400);
       }
 
-      return handleConfigWebRequest(request, { chatService, usageProjectRoot });
+      return handleConfigWebRequest(request, {
+        chatService,
+        oauthLogin: options.oauthLogin,
+        usageProjectRoot,
+      });
     },
     websocket: createTerminalWebSocketHandler(terminalSessionFactory),
   });
@@ -323,6 +340,45 @@ async function handleCustomProviderPost(request: Request): Promise<Response> {
     models: body.models ?? "",
   });
   return jsonResponse(getPublicEditorState());
+}
+
+/**
+ * Persist model metadata for a builtin provider without replacing its transport.
+ */
+async function handleBuiltinProviderPost(request: Request, url: URL): Promise<Response> {
+  const providerId = decodeURIComponent(url.pathname.replace("/api/builtin-providers/", ""));
+  const body = await readJson<{
+    apiKey?: string;
+    defaultModel?: string;
+    models?: string[] | string;
+  }>(request);
+  saveBuiltinProviderModels({
+    providerId,
+    apiKey: body.apiKey ?? "",
+    defaultModel: body.defaultModel ?? "",
+    models: body.models ?? "",
+  });
+  return jsonResponse(getPublicEditorState());
+}
+
+/**
+ * Trigger a browser-based OAuth login flow from the local Web UI.
+ */
+async function handleOAuthLoginPost(url: URL, oauthLogin: OAuthLoginHandler): Promise<Response> {
+  const providerId = decodeURIComponent(url.pathname.replace("/api/oauth-login/", ""));
+  await oauthLogin(providerId);
+  return jsonResponse({ ok: true, state: getPublicEditorState() });
+}
+
+/**
+ * Run the supported builtin OAuth login flow for the requested provider.
+ */
+async function loginOAuthProvider(providerId: string): Promise<void> {
+  const normalized = providerId.trim().toLowerCase();
+  if (!["cx", "codex", "openai-codex"].includes(normalized)) {
+    throw new Error(`Provider '${providerId}' does not support Web OAuth login`);
+  }
+  await CodexOAuth.getInstance().login();
 }
 
 /**
@@ -740,6 +796,12 @@ function renderConfigPage(): string {
       .combo-toggle:hover {
         background: var(--panel-2);
         color: var(--text);
+      }
+      .combo.locked input {
+        color: var(--muted);
+      }
+      .combo.locked .combo-toggle {
+        pointer-events: none;
       }
       .secret-field {
         position: relative;
@@ -1470,7 +1532,7 @@ function renderConfigPage(): string {
               <span data-i18n="providerModal.providerId">Provider ID</span>
               <input id="provider-id" name="providerId" placeholder="corp-openai" required />
             </label>
-            <label>
+            <label id="provider-format-field">
               <span data-i18n="providerModal.compatibleType">Compatible type</span>
               <div class="combo" data-combo="formats">
                 <input id="provider-format" name="format" value="openai" autocomplete="off" readonly />
@@ -1478,11 +1540,11 @@ function renderConfigPage(): string {
                 <div class="combo-menu" role="listbox"></div>
               </div>
             </label>
-            <label>
+            <label id="provider-url-field">
               <span data-i18n="providerModal.baseUrl">Base URL</span>
               <input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" required />
             </label>
-            <label>
+            <label id="provider-key-field">
               <span data-i18n="providerModal.apiKey">API key</span>
               <div class="secret-field">
                 <input id="provider-key" name="apiKey" type="password" placeholder="sk-... or &#36;{ENV_VAR}" autocomplete="off" />
@@ -1507,6 +1569,7 @@ function renderConfigPage(): string {
               <span class="field-help" data-i18n="providerModal.modelsHelp">One model per line. The default model will be added automatically.</span>
             </div>
             <div class="modal-actions">
+              <button class="ghost" id="provider-login" type="button" data-i18n="providerModal.relogin" hidden>Relogin</button>
               <button class="ghost" id="provider-cancel" type="button" data-i18n="common.cancel">Cancel</button>
               <button type="submit" data-i18n="providerModal.save">Save Provider</button>
             </div>
@@ -1521,6 +1584,7 @@ function renderConfigPage(): string {
       let currentState = null;
       let usageState = null;
       let editingProviderId = "";
+      let editingProviderSource = "";
       let providerModelDraft = [];
       let terminal = null;
       let terminalFitAddon = null;
@@ -1548,6 +1612,7 @@ function renderConfigPage(): string {
         "#b38cff",
         "#f59e42",
       ];
+      const CODEX_OAUTH_TYPE_LABEL = "Codex-Oauth";
       const comboStates = new Map();
 
       // UI translations stay client-side so the config API remains unchanged.
@@ -1590,6 +1655,7 @@ function renderConfigPage(): string {
           "providerModal.removeModel": "Remove model",
           "providerModal.emptyModels": "No models added yet.",
           "providerModal.modelsHelp": "Add one model at a time. The default model will be saved with the list.",
+          "providerModal.relogin": "Relogin",
           "providerModal.save": "Save Provider",
           "providerModal.keepKey": "Leave blank to keep saved key",
           "common.cancel": "Cancel",
@@ -1650,6 +1716,8 @@ function renderConfigPage(): string {
           "status.providerDeleted": "Provider deleted.",
           "status.providerUpdated": "Provider updated.",
           "status.providerSaved": "Provider saved.",
+          "status.oauthLoginStarted": "OAuth login started...",
+          "status.oauthLoginDone": "OAuth login completed.",
           "status.terminalStarted": "Chat session started.",
           "status.terminalStopped": "Chat session stopped.",
           "error.terminalStart": "Could not start chat session.",
@@ -1700,6 +1768,7 @@ function renderConfigPage(): string {
           "providerModal.removeModel": "移除模型",
           "providerModal.emptyModels": "还没有添加模型。",
           "providerModal.modelsHelp": "每次添加一个模型。默认模型会随列表一起保存。",
+          "providerModal.relogin": "重新登录",
           "providerModal.save": "保存 Provider",
           "providerModal.keepKey": "留空以保留已保存的 key",
           "common.cancel": "取消",
@@ -1760,6 +1829,8 @@ function renderConfigPage(): string {
           "status.providerDeleted": "Provider 已删除。",
           "status.providerUpdated": "Provider 已更新。",
           "status.providerSaved": "Provider 已保存。",
+          "status.oauthLoginStarted": "正在启动 OAuth 登录...",
+          "status.oauthLoginDone": "OAuth 登录完成。",
           "status.terminalStarted": "聊天会话已启动。",
           "status.terminalStopped": "聊天会话已停止。",
           "error.terminalStart": "无法启动聊天会话。",
@@ -1786,8 +1857,16 @@ function renderConfigPage(): string {
       const providerAddButton = document.querySelector("#provider-add");
       const providerCloseButton = document.querySelector("#provider-close");
       const providerCancelButton = document.querySelector("#provider-cancel");
+      const providerIdEl = document.querySelector("#provider-id");
+      const providerFormatEl = document.querySelector("#provider-format");
+      const providerFormatCombo = document.querySelector("[data-combo='formats']");
+      const providerFormatToggle = providerFormatCombo.querySelector(".combo-toggle");
+      const providerUrlField = document.querySelector("#provider-url-field");
+      const providerUrlEl = document.querySelector("#provider-url");
+      const providerKeyField = document.querySelector("#provider-key-field");
       const providerKeyEl = document.querySelector("#provider-key");
       const providerKeyToggle = document.querySelector("#provider-key-toggle");
+      const providerLoginButton = document.querySelector("#provider-login");
       const providerDefaultModelEl = document.querySelector("#provider-model");
       const providerModelInputEl = document.querySelector("#provider-model-input");
       const providerModelAddButton = document.querySelector("#provider-model-add");
@@ -2022,6 +2101,7 @@ function renderConfigPage(): string {
 
       // Open one combobox and close all siblings.
       function openCombo(state) {
+        if (state.combo.classList.contains("locked")) return;
         closeAllCombos(state.input.id);
         state.open = true;
         state.filterOnInput = false;
@@ -2276,7 +2356,9 @@ function renderConfigPage(): string {
       function createProviderRow(provider, editable) {
         const row = document.createElement("div");
         row.className = "row";
-        const type = provider.kind === "simple" ? provider.format : provider.transport || provider.kind;
+        const type =
+          provider.typeLabel ||
+          (provider.kind === "simple" ? provider.format : provider.transport || provider.kind);
         row.appendChild(codeCell(provider.id));
         row.appendChild(textCell(type || "-"));
         row.appendChild(textCell(providerModelCount(provider)));
@@ -2329,28 +2411,50 @@ function renderConfigPage(): string {
       // Populate the provider form for editing a simple provider.
       function editProvider(provider) {
         editingProviderId = provider.id;
+        editingProviderSource = provider.source || "custom";
         updateProviderModalTitle();
-        document.querySelector("#provider-id").value = provider.id;
-        document.querySelector("#provider-format").value = provider.format || "openai";
-        document.querySelector("#provider-url").value = provider.baseUrl || "";
+        providerIdEl.value = provider.id;
+        providerFormatEl.value =
+          provider.typeLabel ||
+          (provider.authMode === "oauth" ? CODEX_OAUTH_TYPE_LABEL : provider.format || "openai");
+        providerUrlEl.value = provider.baseUrl || "";
         resetProviderKeyVisibility();
         providerKeyEl.value = "";
         providerKeyEl.placeholder = t("providerModal.keepKey");
         providerDefaultModelEl.value = provider.defaultModel || "";
         setProviderModelDraft(provider.models?.length ? provider.models : [provider.defaultModel]);
+        applyProviderModalMode(provider);
         openProviderModal();
       }
 
       // Reset the provider form back to create mode.
       function resetProviderForm() {
         editingProviderId = "";
+        editingProviderSource = "";
         updateProviderModalTitle();
         providerForm.reset();
-        document.querySelector("#provider-format").value = "openai";
+        providerFormatEl.value = "openai";
+        providerUrlEl.value = "";
         providerModelInputEl.value = "";
         setProviderModelDraft([]);
+        applyProviderModalMode(null);
         resetProviderKeyVisibility();
         providerKeyEl.placeholder = "sk-... or $" + "{ENV_VAR}";
+      }
+
+      // Switch the provider modal between custom, builtin, and OAuth-only modes.
+      function applyProviderModalMode(provider) {
+        const isBuiltin = provider?.source === "builtin";
+        const isOAuth = provider?.authMode === "oauth";
+        providerIdEl.readOnly = isBuiltin;
+        providerFormatCombo.classList.toggle("locked", isBuiltin);
+        providerFormatToggle.disabled = isBuiltin;
+        providerUrlField.hidden = Boolean(isOAuth);
+        providerKeyField.hidden = Boolean(isOAuth);
+        providerUrlEl.required = !isOAuth;
+        providerKeyEl.disabled = Boolean(isOAuth);
+        providerKeyToggle.disabled = Boolean(isOAuth);
+        providerLoginButton.hidden = !isOAuth;
       }
 
       // Re-apply the localized modal title without changing create/edit mode.
@@ -2390,11 +2494,36 @@ function renderConfigPage(): string {
         }
       }
 
+      // Start the OAuth login flow for the currently edited builtin provider.
+      async function loginBuiltinProvider() {
+        if (!editingProviderId) return;
+        providerLoginButton.disabled = true;
+        setStatus(t("status.oauthLoginStarted"));
+        try {
+          const result = await requestJson(
+            "/api/oauth-login/" + encodeURIComponent(editingProviderId),
+            { method: "POST" }
+          );
+          setStatus(t("status.oauthLoginDone"));
+          if (result.state) {
+            currentState = result.state;
+            lastEditorState = result.state;
+          }
+          await loadState();
+          const refreshed = currentState.customProviders.find((item) => item.id === editingProviderId);
+          if (refreshed && !providerModal.hidden) editProvider(refreshed);
+        } catch (err) {
+          setStatus(err.message, true);
+        } finally {
+          providerLoginButton.disabled = false;
+        }
+      }
+
       // Open the provider modal for either create or edit mode.
       function openProviderModal() {
         providerModal.hidden = false;
         document.body.classList.add("modal-open");
-        document.querySelector("#provider-id").focus();
+        providerIdEl.focus();
         closeAllCombos();
       }
 
@@ -2788,8 +2917,12 @@ function renderConfigPage(): string {
         const wasEditing = Boolean(editingProviderId);
         const payload = Object.fromEntries(new FormData(form));
         payload.models = collectProviderModels(payload.defaultModel);
+        const endpoint =
+          editingProviderSource === "builtin" && editingProviderId
+            ? "/api/builtin-providers/" + encodeURIComponent(editingProviderId)
+            : "/api/custom-providers";
         try {
-          await requestJson("/api/custom-providers", {
+          await requestJson(endpoint, {
             method: "POST",
             body: JSON.stringify(payload),
           });
@@ -2940,6 +3073,7 @@ function renderConfigPage(): string {
       chatProviderEl.addEventListener("input", refreshModelCombosForProvider);
       providerAddButton.addEventListener("click", newProvider);
       providerKeyToggle.addEventListener("click", toggleProviderKeyVisibility);
+      providerLoginButton.addEventListener("click", loginBuiltinProvider);
       providerModelAddButton.addEventListener("click", () => addProviderModel());
       providerModelInputEl.addEventListener("input", renderProviderModelList);
       providerModelInputEl.addEventListener("keydown", (event) => {

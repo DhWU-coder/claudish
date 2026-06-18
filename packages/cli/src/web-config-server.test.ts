@@ -1,24 +1,47 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "./profile-config.js";
 import { handleConfigWebRequest, startConfigWebServer } from "./web-config-server.js";
 
 const originalClaudishHome = process.env.CLAUDISH_HOME;
+const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+const originalOpenAiCodexApiKey = process.env.OPENAI_CODEX_API_KEY;
 let tempHome: string | undefined;
 let tempUsageRoot: string | undefined;
+
+// Narrow API response shape used by provider-table assertions in this file.
+interface PublicProviderSummaryJson {
+  id: string;
+  source?: string;
+  credentialSource?: string;
+  authMode?: string;
+  typeLabel?: string;
+  baseUrl?: string;
+  defaultModel?: string;
+  models?: string[];
+  apiKey?: string;
+}
 
 beforeEach(() => {
   // The web handler writes through the real config layer, isolated per test.
   tempHome = mkdtempSync(join(tmpdir(), "claudish-web-config-"));
   process.env.CLAUDISH_HOME = join(tempHome, ".claudish");
+  process.env.OPENAI_API_KEY = undefined;
+  process.env.OPENAI_CODEX_API_KEY = undefined;
 });
 
 afterEach(() => {
   // Restore the user's environment so tests never leak config locations.
   if (originalClaudishHome === undefined) process.env.CLAUDISH_HOME = undefined;
   else process.env.CLAUDISH_HOME = originalClaudishHome;
+
+  if (originalOpenAiApiKey === undefined) process.env.OPENAI_API_KEY = undefined;
+  else process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+
+  if (originalOpenAiCodexApiKey === undefined) process.env.OPENAI_CODEX_API_KEY = undefined;
+  else process.env.OPENAI_CODEX_API_KEY = originalOpenAiCodexApiKey;
 
   if (tempHome) {
     rmSync(tempHome, { recursive: true, force: true });
@@ -137,6 +160,23 @@ describe("web config server", () => {
     expect(html).toContain('"providerModal.removeModel"');
     expect(html).toContain('"providerModal.modelsHelp"');
     expect(html).not.toContain('<textarea id="provider-models"');
+  });
+
+  test("GET / renders OAuth provider modal controls", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // OAuth-backed builtin providers should expose a relogin affordance and
+    // mode-switching logic instead of editable endpoint credentials.
+    expect(html).toContain('id="provider-login"');
+    expect(html).toContain('id="provider-url-field"');
+    expect(html).toContain('id="provider-key-field"');
+    expect(html).toContain("applyProviderModalMode");
+    expect(html).toContain("loginBuiltinProvider");
+    expect(html).toContain("Codex-Oauth");
+    expect(html).toContain('"providerModal.relogin"');
+    expect(html).toContain('"status.oauthLoginStarted"');
+    expect(html).toContain('"status.oauthLoginDone"');
   });
 
   test("GET / renders theme toggle as a light dark icon button", async () => {
@@ -366,6 +406,115 @@ describe("web config server", () => {
     expect(body.customProviders[0].models).toEqual(["gpt-4o", "gpt-4.1"]);
   });
 
+  test("GET /api/config includes configured builtin providers", async () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    const response = await handleConfigWebRequest(request("/api/config"));
+    const body = (await response.json()) as { customProviders: PublicProviderSummaryJson[] };
+    const codex = body.customProviders.find((provider) => provider.id === "cx");
+
+    // The provider table should include builtin providers once credentials
+    // make them real configured options.
+    expect(response.status).toBe(200);
+    expect(codex).toMatchObject({
+      id: "cx",
+      source: "builtin",
+      credentialSource: "oauth-file",
+      authMode: "oauth",
+      typeLabel: "Codex-Oauth",
+    });
+    expect(codex?.baseUrl).toBeUndefined();
+    expect(codex?.models).toContain("gpt-5.5");
+    expect(codex?.apiKey).toBe("");
+  });
+
+  test("POST /api/builtin-providers/:id persists builtin model metadata only", async () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    const response = await handleConfigWebRequest(
+      request("/api/builtin-providers/cx", {
+        method: "POST",
+        body: JSON.stringify({
+          defaultModel: "gpt-5-codex",
+          models: ["gpt-5-codex", "gpt-5.5"],
+        }),
+      })
+    );
+    const body = (await response.json()) as { customProviders: PublicProviderSummaryJson[] };
+    const codex = body.customProviders.find((provider) => provider.id === "cx");
+
+    // Saving cx model metadata must not create customEndpoints.cx, otherwise
+    // the real Codex OAuth transport would be shadowed.
+    expect(response.status).toBe(200);
+    expect(loadConfig().customEndpoints?.cx).toBeUndefined();
+    expect(loadConfig().builtinProviderModels?.cx).toEqual(["gpt-5-codex", "gpt-5.5"]);
+    expect(codex?.defaultModel).toBe("gpt-5-codex");
+  });
+
+  test("POST /api/builtin-providers/:id refreshes an API-key builtin credential", async () => {
+    saveConfig({
+      ...loadConfig(),
+      apiKeys: { OPENROUTER_API_KEY: "old-openrouter-key" },
+    });
+
+    const response = await handleConfigWebRequest(
+      request("/api/builtin-providers/or", {
+        method: "POST",
+        body: JSON.stringify({
+          apiKey: "new-openrouter-key",
+          defaultModel: "openai/gpt-5",
+          models: ["openai/gpt-5", "anthropic/claude-sonnet-4"],
+        }),
+      })
+    );
+    const body = (await response.json()) as { customProviders: PublicProviderSummaryJson[] };
+    const openrouter = body.customProviders.find((provider) => provider.id === "or");
+
+    // Builtin API-key edits should refresh ~/.claudish/config.json apiKeys
+    // without creating a same-id custom endpoint shadow.
+    expect(response.status).toBe(200);
+    expect(loadConfig().customEndpoints?.or).toBeUndefined();
+    expect(loadConfig().apiKeys?.OPENROUTER_API_KEY).toBe("new-openrouter-key");
+    expect(openrouter?.defaultModel).toBe("openai/gpt-5");
+  });
+
+  test("POST /api/oauth-login/:id triggers the configured login handler", async () => {
+    const calls: string[] = [];
+    const response = await handleConfigWebRequest(
+      request("/api/oauth-login/cx", { method: "POST" }),
+      {
+        oauthLogin: async (providerId) => {
+          calls.push(providerId);
+        },
+      }
+    );
+    const body = (await response.json()) as { ok: boolean };
+
+    // The Web UI delegates browser-based OAuth login to a server-side handler
+    // so tests never need to open the real OpenAI auth page.
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(calls).toEqual(["cx"]);
+  });
+
   test("POST /api/defaults persists default model and provider", async () => {
     const response = await handleConfigWebRequest(
       request("/api/defaults", {
@@ -511,6 +660,48 @@ describe("web config server", () => {
 
     expect(response.status).toBe(200);
     expect(loadConfig().customEndpoints?.["corp-openai"]).toBeUndefined();
+  });
+
+  test("DELETE /api/custom-providers/:id clears builtin OAuth credentials", async () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    const response = await handleConfigWebRequest(
+      request("/api/custom-providers/cx", { method: "DELETE" })
+    );
+    const body = (await response.json()) as {
+      deleted: boolean;
+      state: { customProviders: PublicProviderSummaryJson[] };
+    };
+
+    // Builtin delete is credential cleanup: after removing the OAuth cache,
+    // the builtin provider no longer appears as configured.
+    expect(response.status).toBe(200);
+    expect(body.deleted).toBe(true);
+    expect(existsSync(oauthPath)).toBe(false);
+    expect(body.state.customProviders.some((provider) => provider.id === "cx")).toBe(false);
+  });
+
+  test("DELETE /api/custom-providers/:id reports env-backed builtin credentials", async () => {
+    process.env.OPENAI_CODEX_API_KEY = "sk-env";
+
+    const response = await handleConfigWebRequest(
+      request("/api/custom-providers/cx", { method: "DELETE" })
+    );
+    const body = await response.json();
+
+    // Environment variables are outside the config file, so the Web UI should
+    // tell the user what to unset instead of pretending deletion worked.
+    expect(response.status).toBe(400);
+    expect(body.error).toContain("OPENAI_CODEX_API_KEY");
   });
 
   test("POST /api/chat streams through the injected chat service", async () => {

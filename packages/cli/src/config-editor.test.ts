@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   deleteCustomProvider,
   getConfigEditorState,
+  saveBuiltinProviderModels,
   saveGeneralDefaults,
   saveSimpleCustomProvider,
 } from "./config-editor.js";
@@ -13,6 +14,8 @@ import { loadConfig, saveConfig } from "./profile-config.js";
 const originalClaudishHome = process.env.CLAUDISH_HOME;
 const originalDefaultProvider = process.env.CLAUDISH_DEFAULT_PROVIDER;
 const originalModel = process.env.CLAUDISH_MODEL;
+const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+const originalOpenAiCodexApiKey = process.env.OPENAI_CODEX_API_KEY;
 let tempHome: string | undefined;
 
 beforeEach(() => {
@@ -21,6 +24,8 @@ beforeEach(() => {
   process.env.CLAUDISH_HOME = join(tempHome, ".claudish");
   process.env.CLAUDISH_DEFAULT_PROVIDER = undefined;
   process.env.CLAUDISH_MODEL = undefined;
+  process.env.OPENAI_API_KEY = undefined;
+  process.env.OPENAI_CODEX_API_KEY = undefined;
 });
 
 afterEach(() => {
@@ -33,6 +38,12 @@ afterEach(() => {
 
   if (originalModel === undefined) process.env.CLAUDISH_MODEL = undefined;
   else process.env.CLAUDISH_MODEL = originalModel;
+
+  if (originalOpenAiApiKey === undefined) process.env.OPENAI_API_KEY = undefined;
+  else process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+
+  if (originalOpenAiCodexApiKey === undefined) process.env.OPENAI_CODEX_API_KEY = undefined;
+  else process.env.OPENAI_CODEX_API_KEY = originalOpenAiCodexApiKey;
 
   if (tempHome) {
     rmSync(tempHome, { recursive: true, force: true });
@@ -50,6 +61,123 @@ describe("config editor", () => {
     const config = loadConfig();
     expect(config.defaultModel).toBe("gpt-5.5");
     expect(config.defaultProvider).toBe("openrouter");
+  });
+
+  test("getConfigEditorState includes configured builtin OAuth providers", () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    const state = getConfigEditorState();
+    const codex = state.customProviders.find((provider) => provider.id === "cx");
+
+    // Builtin providers only appear in the editable table after local auth is configured.
+    expect(codex).toMatchObject({
+      id: "cx",
+      source: "builtin",
+      credentialSource: "oauth-file",
+      authMode: "oauth",
+      typeLabel: "Codex-Oauth",
+      authFile: oauthPath,
+      defaultModel: "gpt-5.5",
+    });
+    expect(codex?.baseUrl).toBeUndefined();
+    expect(codex?.models).toContain("gpt-5.5");
+    expect(codex?.models).toContain("gpt-5-codex");
+  });
+
+  test("saveBuiltinProviderModels persists OAuth provider models without custom endpoint overrides", () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    saveBuiltinProviderModels({
+      providerId: "cx",
+      defaultModel: "gpt-5-codex",
+      models: ["gpt-5-codex", "gpt-5.5"],
+    });
+
+    const config = loadConfig();
+    const codex = getConfigEditorState().customProviders.find((provider) => provider.id === "cx");
+
+    // Builtin OAuth provider model editing is metadata only; it must not turn
+    // cx into a plain custom OpenAI endpoint.
+    expect(config.customEndpoints?.cx).toBeUndefined();
+    expect(config.builtinProviderModels?.cx).toEqual(["gpt-5-codex", "gpt-5.5"]);
+    expect(codex?.defaultModel).toBe("gpt-5-codex");
+    expect(codex?.models).toEqual(["gpt-5-codex", "gpt-5.5"]);
+  });
+
+  test("saveBuiltinProviderModels can refresh an API-key builtin without custom endpoint overrides", () => {
+    saveConfig({
+      ...loadConfig(),
+      apiKeys: { OPENROUTER_API_KEY: "old-key" },
+    });
+
+    saveBuiltinProviderModels({
+      providerId: "or",
+      apiKey: "new-key",
+      defaultModel: "openai/gpt-5",
+      models: ["openai/gpt-5", "anthropic/claude-sonnet-4"],
+    });
+
+    const config = loadConfig();
+    const openrouter = getConfigEditorState().customProviders.find(
+      (provider) => provider.id === "or"
+    );
+
+    // Builtin API-key providers keep their builtin transport while allowing
+    // the UI to refresh the stored local credential and model list.
+    expect(config.customEndpoints?.or).toBeUndefined();
+    expect(config.apiKeys?.OPENROUTER_API_KEY).toBe("new-key");
+    expect(config.builtinProviderModels?.or).toEqual(["openai/gpt-5", "anthropic/claude-sonnet-4"]);
+    expect(openrouter?.apiKey).toBe("new-key");
+  });
+
+  test("deleteCustomProvider clears builtin OAuth credentials without disabling the provider", () => {
+    const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    saveConfig({ ...loadConfig(), defaultProvider: "openai-codex" });
+    writeFileSync(
+      oauthPath,
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_at: Date.now() + 60_000,
+      })
+    );
+
+    expect(deleteCustomProvider("cx")).toBe(true);
+
+    // Removing a builtin provider means clearing its local auth cache; the row
+    // disappears because it is no longer configured.
+    expect(existsSync(oauthPath)).toBe(false);
+    expect(loadConfig().defaultProvider).toBeUndefined();
+    expect(getConfigEditorState().customProviders.some((provider) => provider.id === "cx")).toBe(
+      false
+    );
+  });
+
+  test("deleteCustomProvider refuses to clear builtin credentials that only come from env", () => {
+    process.env.OPENAI_CODEX_API_KEY = "sk-env";
+
+    expect(() => deleteCustomProvider("cx")).toThrow(
+      "Provider 'cx' is configured by environment variable OPENAI_CODEX_API_KEY"
+    );
   });
 
   test("saveGeneralDefaults splits provider model specs before persisting", () => {

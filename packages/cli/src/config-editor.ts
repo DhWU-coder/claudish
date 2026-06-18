@@ -6,9 +6,21 @@
  * different behavior.
  */
 
+import { existsSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { type DefaultProviderSource, resolveDefaultProvider } from "./default-provider.js";
-import { type ClaudishProfileConfig, loadConfig, saveConfig } from "./profile-config.js";
-import { getAllProviders, getProviderByName } from "./providers/provider-definitions.js";
+import {
+  type ClaudishProfileConfig,
+  loadConfig,
+  removeApiKey,
+  saveConfig,
+} from "./profile-config.js";
+import {
+  type ProviderDefinition,
+  getAllProviders,
+  getProviderByName,
+} from "./providers/provider-definitions.js";
 
 export type CustomProviderFormat = "openai" | "anthropic" | "gemini";
 
@@ -35,8 +47,19 @@ export interface SimpleCustomProviderInput {
   models?: string[] | string;
 }
 
+export interface BuiltinProviderModelsInput {
+  providerId: string;
+  apiKey?: string;
+  defaultModel?: string;
+  models?: string[] | string;
+}
+
 export interface CustomProviderSummary {
   id: string;
+  source: "custom" | "builtin";
+  credentialSource?: "config-api-key" | "env-var" | "oauth-file";
+  authMode?: "api-key" | "oauth";
+  typeLabel?: string;
   kind: "simple" | "complex" | "invalid";
   displayName: string;
   format?: CustomProviderFormat;
@@ -46,6 +69,7 @@ export interface CustomProviderSummary {
   defaultModel?: string;
   models: string[];
   error?: string;
+  authFile?: string;
 }
 
 export interface ConfigEditorState {
@@ -149,7 +173,14 @@ export function saveGeneralDefaults(input: GeneralDefaultsInput): ClaudishProfil
  */
 export function getCustomProviderSecret(providerId: string): string | undefined {
   const normalized = normalizeCustomProviderId(providerId);
-  const apiKey = readExistingCustomProviderApiKey(loadConfig(), normalized);
+  const config = loadConfig();
+  const builtin = findBuiltinProvider(normalized);
+  if (builtin) {
+    const credential = builtinCredentialSource(config, builtin);
+    return credential?.source === "config-api-key" ? credential.value : undefined;
+  }
+
+  const apiKey = readExistingCustomProviderApiKey(config, normalized);
   return apiKey || undefined;
 }
 
@@ -184,11 +215,50 @@ export function saveSimpleCustomProvider(input: SimpleCustomProviderInput): Clau
 }
 
 /**
+ * Persist editable model metadata for a builtin provider without changing its transport.
+ */
+export function saveBuiltinProviderModels(
+  input: BuiltinProviderModelsInput
+): ClaudishProfileConfig {
+  const providerId = normalizeCustomProviderId(input.providerId);
+  const provider = findBuiltinProvider(providerId);
+  if (!provider) {
+    throw new Error(`Provider '${providerId}' is not a builtin provider`);
+  }
+
+  const summaryId = provider.shortestPrefix || provider.name;
+  const defaultModel = input.defaultModel?.trim() ?? "";
+  const apiKey = input.apiKey?.trim() ?? "";
+  const models = normalizeProviderModels(input.models, defaultModel);
+  const config = loadConfig();
+  const nextModels = { ...(config.builtinProviderModels ?? {}) };
+
+  if (models.length > 0) nextModels[summaryId] = models;
+  else delete nextModels[summaryId];
+
+  // Builtin API-key providers keep their transport fixed, but a typed key can
+  // still refresh the stored credential used by the transport.
+  if (apiKey && provider.apiKeyEnvVar) {
+    config.apiKeys = { ...(config.apiKeys ?? {}), [provider.apiKeyEnvVar]: apiKey };
+  }
+
+  config.builtinProviderModels = Object.keys(nextModels).length > 0 ? nextModels : undefined;
+  saveConfig(config);
+  return config;
+}
+
+/**
  * Delete a custom provider endpoint by id.
  */
 export function deleteCustomProvider(providerId: string): boolean {
   const normalized = normalizeCustomProviderId(providerId);
   const config = loadConfig();
+  const builtin = findBuiltinProvider(normalized);
+
+  if (builtin) {
+    return deleteBuiltinProviderCredentials(config, normalized, builtin);
+  }
+
   if (!config.customEndpoints || !(normalized in config.customEndpoints)) {
     return false;
   }
@@ -231,7 +301,7 @@ export function getConfigEditorState(env: NodeJS.ProcessEnv = process.env): Conf
     modelOptions: buildModelOptions(config),
     modelOptionsByProvider: buildModelOptionsByProvider(config),
     providerOptions: buildProviderOptions(config),
-    customProviders: summarizeCustomProviders(config),
+    customProviders: summarizeConfiguredProviders(config),
   };
 }
 
@@ -335,7 +405,7 @@ function buildModelOptions(config: ClaudishProfileConfig): string[] {
 
   // Put user-configured values first because they are most likely to be reused.
   addOption(options, config.defaultModel);
-  for (const provider of summarizeCustomProviders(config)) {
+  for (const provider of summarizeConfiguredProviders(config)) {
     for (const model of provider.models) {
       addOption(options, `${provider.id}@${model}`);
     }
@@ -358,7 +428,7 @@ function buildModelOptionsByProvider(config: ClaudishProfileConfig): Record<stri
   });
 
   addProviderModelOptions(options, defaults.defaultProvider, defaults.defaultModel);
-  for (const provider of summarizeCustomProviders(config)) {
+  for (const provider of summarizeConfiguredProviders(config)) {
     for (const model of provider.models) {
       addProviderModelOptions(options, provider.id, model);
     }
@@ -464,12 +534,19 @@ function resolveEffectiveDefaultModel(
 }
 
 /**
- * Convert raw custom endpoint config into rows a UI can render directly.
+ * Convert configured custom and builtin providers into rows a UI can render directly.
  */
-function summarizeCustomProviders(config: ClaudishProfileConfig): CustomProviderSummary[] {
-  return Object.entries(config.customEndpoints ?? {}).map(([id, value]) =>
+function summarizeConfiguredProviders(config: ClaudishProfileConfig): CustomProviderSummary[] {
+  const customProviders = Object.entries(config.customEndpoints ?? {}).map(([id, value]) =>
     summarizeCustomProvider(id, value)
   );
+  const customIds = new Set(customProviders.map((provider) => provider.id));
+  return [
+    ...customProviders,
+    ...summarizeConfiguredBuiltinProviders(config).filter(
+      (provider) => !customIds.has(provider.id)
+    ),
+  ];
 }
 
 /**
@@ -506,6 +583,7 @@ function summarizeSimpleCustomProvider(
   const defaultModel = typeof entry.defaultModel === "string" ? entry.defaultModel : undefined;
   return {
     id,
+    source: "custom",
     kind: "simple",
     displayName: id,
     format: isCustomProviderFormat(entry.format) ? entry.format : undefined,
@@ -525,6 +603,7 @@ function summarizeComplexCustomProvider(
 ): CustomProviderSummary {
   return {
     id,
+    source: "custom",
     kind: "complex",
     displayName: typeof entry.displayName === "string" ? entry.displayName : id,
     transport: typeof entry.transport === "string" ? entry.transport : undefined,
@@ -541,12 +620,197 @@ function summarizeComplexCustomProvider(
 function invalidCustomProvider(id: string, apiKey: string, error: string): CustomProviderSummary {
   return {
     id,
+    source: "custom",
     kind: "invalid",
     displayName: id,
     apiKey,
     models: [],
     error,
   };
+}
+
+/**
+ * Build rows for builtin providers only after the user has configured auth.
+ */
+function summarizeConfiguredBuiltinProviders(
+  config: ClaudishProfileConfig
+): CustomProviderSummary[] {
+  const providers: CustomProviderSummary[] = [];
+  for (const provider of getAllProviders()) {
+    const credential = builtinCredentialSource(config, provider);
+    if (!credential) continue;
+    providers.push(summarizeConfiguredBuiltinProvider(provider, config, credential));
+  }
+  return providers;
+}
+
+/**
+ * Convert one configured builtin provider definition into the shared UI row.
+ */
+function summarizeConfiguredBuiltinProvider(
+  provider: ProviderDefinition,
+  config: ClaudishProfileConfig,
+  credential: NonNullable<ReturnType<typeof builtinCredentialSource>>
+): CustomProviderSummary {
+  const id = provider.shortestPrefix || provider.name;
+  const authMode = builtinProviderAuthMode(provider, credential);
+  const models = builtinProviderModels(config, id);
+  return {
+    id,
+    source: "builtin",
+    credentialSource: credential.source,
+    authMode,
+    typeLabel: builtinProviderTypeLabel(provider, authMode),
+    kind: "simple",
+    displayName: provider.displayName,
+    format: builtinProviderFormat(provider),
+    transport: provider.transport,
+    ...(authMode === "oauth" ? {} : { baseUrl: provider.baseUrl }),
+    apiKey: credential.source === "config-api-key" ? credential.value : "",
+    defaultModel: models[0],
+    models,
+    authFile: credential.authFile,
+  };
+}
+
+/**
+ * Treat Codex as OAuth in the editor even if an env var is also present.
+ */
+function builtinProviderAuthMode(
+  provider: ProviderDefinition,
+  credential: NonNullable<ReturnType<typeof builtinCredentialSource>>
+): "api-key" | "oauth" {
+  if (provider.name === "openai-codex" || credential.source === "oauth-file") return "oauth";
+  return "api-key";
+}
+
+/**
+ * Return the human-facing type label used in provider tables and modals.
+ */
+function builtinProviderTypeLabel(
+  provider: ProviderDefinition,
+  authMode: "api-key" | "oauth"
+): string {
+  if (provider.name === "openai-codex" && authMode === "oauth") return "Codex-Oauth";
+  return builtinProviderFormat(provider);
+}
+
+/**
+ * Collapse builtin transport variants into the simple endpoint formats the UI knows.
+ */
+function builtinProviderFormat(provider: ProviderDefinition): CustomProviderFormat {
+  if (provider.transport === "gemini" || provider.transport === "gemini-oauth") return "gemini";
+  if (provider.transport === "anthropic") return "anthropic";
+  return "openai";
+}
+
+/**
+ * Resolve whether a builtin provider has user-supplied credentials.
+ */
+function builtinCredentialSource(
+  config: ClaudishProfileConfig,
+  provider: ProviderDefinition
+):
+  | { source: "config-api-key"; value: string; envVar: string }
+  | { source: "env-var"; value: string; envVar: string }
+  | { source: "oauth-file"; authFile: string }
+  | undefined {
+  const apiKeyEnvVars = builtinApiKeyEnvVars(provider);
+  for (const envVar of apiKeyEnvVars) {
+    const value = config.apiKeys?.[envVar];
+    if (value) return { source: "config-api-key", value, envVar };
+  }
+  for (const envVar of apiKeyEnvVars) {
+    const value = process.env[envVar];
+    if (value) return { source: "env-var", value, envVar };
+  }
+  const authFile = builtinOAuthPath(provider);
+  if (authFile && existsSync(authFile)) return { source: "oauth-file", authFile };
+  return undefined;
+}
+
+/**
+ * Return the primary and alias env vars that can provide a builtin API key.
+ */
+function builtinApiKeyEnvVars(provider: ProviderDefinition): string[] {
+  return [provider.apiKeyEnvVar, ...(provider.apiKeyAliases ?? [])].filter(Boolean);
+}
+
+/**
+ * Resolve OAuth fallback paths with the same CLAUDISH_HOME convention as auth managers.
+ */
+function builtinOAuthPath(provider: ProviderDefinition): string | undefined {
+  if (!provider.oauthFallback) return undefined;
+  return join(process.env.CLAUDISH_HOME || join(homedir(), ".claudish"), provider.oauthFallback);
+}
+
+/**
+ * Choose stable builtin model rows from the offline provider@model suggestions.
+ */
+function builtinProviderModels(config: ClaudishProfileConfig, providerId: string): string[] {
+  const configured = normalizeProviderModels(config.builtinProviderModels?.[providerId]);
+  if (configured.length > 0) return configured;
+
+  const models = COMMON_MODEL_OPTIONS.flatMap((value) => {
+    const split = splitProviderModelSpec(value);
+    return split && providerOptionKeys(split.provider).includes(providerId) ? [split.model] : [];
+  });
+  return models.length > 0 ? [...new Set(models)] : [];
+}
+
+/**
+ * Find a builtin provider by canonical name or shortcut.
+ */
+function findBuiltinProvider(providerId: string): ProviderDefinition | undefined {
+  return getAllProviders().find(
+    (provider) =>
+      provider.name === providerId ||
+      provider.shortestPrefix === providerId ||
+      provider.shortcuts?.includes(providerId)
+  );
+}
+
+/**
+ * Match a saved provider value against every public id for the builtin provider.
+ */
+function providerMatchesBuiltinId(
+  value: string | undefined,
+  provider: ProviderDefinition
+): boolean {
+  if (!value) return false;
+  return providerOptionKeys(value).some(
+    (key) => key === provider.name || key === provider.shortestPrefix
+  );
+}
+
+/**
+ * Clear local credentials for a builtin provider; env-backed credentials cannot be removed here.
+ */
+function deleteBuiltinProviderCredentials(
+  config: ClaudishProfileConfig,
+  providerId: string,
+  provider: ProviderDefinition
+): boolean {
+  const credential = builtinCredentialSource(config, provider);
+  if (!credential) return false;
+  if (credential.source === "env-var") {
+    throw new Error(
+      `Provider '${providerId}' is configured by environment variable ${credential.envVar}; unset it outside Claudish.`
+    );
+  }
+
+  if (credential.source === "config-api-key") {
+    removeApiKey(credential.envVar);
+  } else {
+    unlinkSync(credential.authFile);
+  }
+
+  if (providerMatchesBuiltinId(config.defaultProvider, provider)) {
+    const updated = loadConfig();
+    updated.defaultProvider = undefined;
+    saveConfig(updated);
+  }
+  return true;
 }
 
 /**

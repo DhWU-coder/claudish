@@ -150,6 +150,12 @@ export interface ClaudishProfileConfig {
    * Validation of entries happens at the consumption site (Phase 3) via Zod, not here.
    */
   customEndpoints?: Record<string, unknown>;
+
+  /**
+   * UI-managed model lists for builtin providers. This stores presentation
+   * metadata only and must not shadow builtin transport/auth behavior.
+   */
+  builtinProviderModels?: Record<string, string[]>;
 }
 
 /**
@@ -243,6 +249,9 @@ export function loadConfig(): ClaudishProfileConfig {
     }
     if (config.customEndpoints !== undefined) {
       merged.customEndpoints = config.customEndpoints;
+    }
+    if (config.builtinProviderModels !== undefined) {
+      merged.builtinProviderModels = config.builtinProviderModels;
     }
     return merged;
   } catch (error) {
@@ -415,7 +424,7 @@ export function getProfile(name: string, scope?: ProfileScope): Profile | undefi
 export function getDefaultProfile(scope?: ProfileScope): Profile {
   if (scope === "local") {
     const local = loadLocalConfig();
-    if (local && local.defaultProfile && local.profiles[local.defaultProfile]) {
+    if (local?.defaultProfile && local.profiles[local.defaultProfile]) {
       return local.profiles[local.defaultProfile];
     }
     // Local config exists but no valid default — return empty
@@ -433,7 +442,7 @@ export function getDefaultProfile(scope?: ProfileScope): Profile {
 
   // No scope: local-first resolution
   const local = loadLocalConfig();
-  if (local && local.defaultProfile) {
+  if (local?.defaultProfile) {
     // Resolve the name local-first, then global
     const profile = getProfile(local.defaultProfile);
     if (profile) return profile;
