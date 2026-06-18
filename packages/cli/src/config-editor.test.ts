@@ -384,9 +384,9 @@ describe("config editor", () => {
 
     const state = getConfigEditorState();
 
-    expect(state.modelOptionsByProvider.cx).toContain("gpt-5.5");
-    expect(state.modelOptionsByProvider.cx).toContain("gpt-5-codex");
+    expect(state.providerOptions).toEqual(["corp-openai"]);
+    expect(state.modelOptions).not.toContain("cx@gpt-5.5");
+    expect(state.modelOptionsByProvider.cx).toBeUndefined();
     expect(state.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o", "gpt-4.1"]);
-    expect(state.modelOptionsByProvider.cx).not.toContain("cx@gpt-5.5");
   });
 });

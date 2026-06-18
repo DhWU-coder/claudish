@@ -174,6 +174,8 @@ describe("web config server", () => {
     expect(html).toContain("applyProviderModalMode");
     expect(html).toContain("loginBuiltinProvider");
     expect(html).toContain("Codex-Oauth");
+    expect(html).toContain("[hidden]");
+    expect(html).toContain("display: none !important");
     expect(html).toContain('"providerModal.relogin"');
     expect(html).toContain('"status.oauthLoginStarted"');
     expect(html).toContain('"status.oauthLoginDone"');
@@ -399,9 +401,10 @@ describe("web config server", () => {
     const response = await handleConfigWebRequest(request("/api/config"));
     const body = await response.json();
 
-    expect(body.modelOptions).toContain("cx@gpt-5.5");
+    expect(body.providerOptions).toEqual(["corp-openai"]);
+    expect(body.modelOptions).not.toContain("cx@gpt-5.5");
     expect(body.modelOptions).toContain("corp-openai@gpt-4o");
-    expect(body.modelOptionsByProvider.cx).toContain("gpt-5.5");
+    expect(body.modelOptionsByProvider.cx).toBeUndefined();
     expect(body.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o", "gpt-4.1"]);
     expect(body.customProviders[0].models).toEqual(["gpt-4o", "gpt-4.1"]);
   });
@@ -435,6 +438,9 @@ describe("web config server", () => {
     expect(codex?.baseUrl).toBeUndefined();
     expect(codex?.models).toContain("gpt-5.5");
     expect(codex?.apiKey).toBe("");
+    expect(body.providerOptions).toContain("cx");
+    expect(body.providerOptions).not.toContain("g");
+    expect(body.providerOptions).not.toContain("google");
   });
 
   test("POST /api/builtin-providers/:id persists builtin model metadata only", async () => {
@@ -726,6 +732,51 @@ describe("web config server", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(await response.text()).toContain("hello");
+  });
+
+  test("startConfigWebServer opens the local Web UI when requested", () => {
+    let openedUrl = "";
+    const server = startConfigWebServer({
+      openBrowser: true,
+      browserOpener: (url) => {
+        // Capturing the URL avoids launching a real browser in tests while
+        // proving the server uses the actual bound localhost port.
+        openedUrl = url;
+      },
+    });
+
+    try {
+      expect(openedUrl).toBe(`http://127.0.0.1:${server.port}/`);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("startConfigWebServer keeps serving when browser opening fails", async () => {
+    const originalWarn = console.warn;
+    console.warn = () => {
+      // Expected opener failures are asserted by keeping the server alive.
+    };
+
+    try {
+      const server = startConfigWebServer({
+        openBrowser: true,
+        browserOpener: () => {
+          // Browser opening is convenience only; failure must not kill the UI.
+          throw new Error("browser unavailable");
+        },
+      });
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${server.port}/favicon.ico`);
+
+        expect(response.status).toBe(204);
+      } finally {
+        server.stop(true);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("terminal websocket starts claudish in the configured project directory", async () => {

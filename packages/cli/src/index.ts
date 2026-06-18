@@ -155,7 +155,7 @@ if (isMcpMode) {
 } else if (isConfigCommand || isConfigWebCommand) {
   if (isConfigWebCommand) {
     // Browser configuration UI: claudish web / claudish config --web
-    import("./web-config-server.js").then((m) => m.startConfigWebServer());
+    import("./web-config-cli.js").then((m) => m.startConfigWebCli());
   } else {
     // Interactive configuration TUI: claudish config (full-screen btop-inspired TUI)
     import("./tui/index.js").then((m) => m.startConfigTui().catch(handlePromptExit));
@@ -256,7 +256,7 @@ async function runCli() {
 
       // Print final status (interactive may not reach here until user quits magmux)
       const modelIds = Object.keys(status.models).sort();
-      console.log(`\nTeam Status`);
+      console.log("\nTeam Status");
       for (const id of modelIds) {
         const m = status.models[id];
         const duration =

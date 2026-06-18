@@ -398,20 +398,17 @@ function modelSourceToProviderSource(source: EffectiveValueSource): DefaultProvi
 }
 
 /**
- * Build model suggestions from stable defaults and the user's config.
+ * Build model suggestions from providers that are actually configured.
  */
 function buildModelOptions(config: ClaudishProfileConfig): string[] {
   const options = new Set<string>();
 
-  // Put user-configured values first because they are most likely to be reused.
-  addOption(options, config.defaultModel);
+  // Only configured providers are safe to suggest because selecting an
+  // unconfigured builtin would fail at call time.
   for (const provider of summarizeConfiguredProviders(config)) {
     for (const model of provider.models) {
       addOption(options, `${provider.id}@${model}`);
     }
-  }
-  for (const model of COMMON_MODEL_OPTIONS) {
-    addOption(options, model);
   }
 
   return [...options];
@@ -422,20 +419,13 @@ function buildModelOptions(config: ClaudishProfileConfig): string[] {
  */
 function buildModelOptionsByProvider(config: ClaudishProfileConfig): Record<string, string[]> {
   const options = new Map<string, Set<string>>();
-  const defaults = normalizeGeneralDefaults({
-    defaultModel: config.defaultModel,
-    defaultProvider: config.defaultProvider,
-  });
 
-  addProviderModelOptions(options, defaults.defaultProvider, defaults.defaultModel);
+  // Keep provider-scoped model dropdowns aligned with the visible provider
+  // dropdown by only indexing configured providers.
   for (const provider of summarizeConfiguredProviders(config)) {
     for (const model of provider.models) {
       addProviderModelOptions(options, provider.id, model);
     }
-  }
-  for (const value of COMMON_MODEL_OPTIONS) {
-    const split = splitProviderModelSpec(value);
-    if (split) addProviderModelOptions(options, split.provider, split.model);
   }
 
   return Object.fromEntries(
@@ -488,19 +478,15 @@ function providerOptionKeys(providerId: string): string[] {
 }
 
 /**
- * Build provider suggestions from built-ins plus custom endpoints.
+ * Build provider suggestions from currently configured providers only.
  */
 function buildProviderOptions(config: ClaudishProfileConfig): string[] {
   const options = new Set<string>();
 
-  // The saved default comes first so keyboard users hit their current choice quickly.
-  addOption(options, config.defaultProvider);
-  for (const provider of getAllProviders()) {
-    addOption(options, provider.shortestPrefix);
-    addOption(options, provider.name);
-  }
-  for (const providerId of Object.keys(config.customEndpoints ?? {})) {
-    addOption(options, providerId);
+  // The Web UI should not offer builtin providers that have no key or OAuth
+  // credential, so it follows the same configured-provider list as the table.
+  for (const provider of summarizeConfiguredProviders(config)) {
+    addOption(options, provider.id);
   }
 
   return [...options];

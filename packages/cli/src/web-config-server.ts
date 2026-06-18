@@ -31,6 +31,9 @@ import { getUsageDashboard, resolveClaudishProjectRoot } from "./web-usage-servi
 type TerminalSessionFactory = (options: CreatePythonTerminalSessionOptions) => WebTerminalSession;
 type OAuthLoginHandler = (providerId: string) => Promise<void>;
 
+/** Opens a URL in the user's browser, injectable so tests never launch apps. */
+type BrowserOpener = (url: string) => void;
+
 interface TerminalSocketData {
   provider: string;
   model: string;
@@ -43,6 +46,10 @@ interface TerminalSocketData {
 export interface ConfigWebServerOptions {
   port?: number;
   chatService?: WebChatService;
+  /** Whether to open the local Web UI after binding the server port. */
+  openBrowser?: boolean;
+  /** Browser opener used for tests or platform-specific launch behavior. */
+  browserOpener?: BrowserOpener;
   oauthLogin?: OAuthLoginHandler;
   terminalSessionFactory?: TerminalSessionFactory;
   terminalWorkingDirectory?: string;
@@ -211,9 +218,48 @@ export function startConfigWebServer(
     websocket: createTerminalWebSocketHandler(terminalSessionFactory),
   });
 
-  console.log(`Claudish Config Web UI: http://127.0.0.1:${server.port}/`);
+  const webUiUrl = `http://127.0.0.1:${server.port}/`;
+  console.log(`Claudish Config Web UI: ${webUiUrl}`);
   console.log("Press Ctrl+C to stop.");
+
+  if (options.openBrowser) {
+    openConfigWebBrowser(webUiUrl, options.browserOpener ?? openUrlInBrowser);
+  }
   return server;
+}
+
+/**
+ * Open the Web UI as a convenience without making browser failure fatal.
+ */
+function openConfigWebBrowser(url: string, opener: BrowserOpener): void {
+  try {
+    opener(url);
+  } catch (err) {
+    console.warn(
+      `Could not open browser automatically: ${err instanceof Error ? err.message : String(err)}`
+    );
+    console.warn(`Open manually: ${url}`);
+  }
+}
+
+/**
+ * Dispatch to the host operating system's standard URL opener.
+ */
+function openUrlInBrowser(url: string): void {
+  Bun.spawn({
+    cmd: browserOpenCommand(url),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+}
+
+/**
+ * Build an OS-specific command for opening a local URL.
+ */
+function browserOpenCommand(url: string): string[] {
+  if (process.platform === "darwin") return ["open", url];
+  if (process.platform === "win32") return ["cmd", "/c", "start", "", url];
+  return ["xdg-open", url];
 }
 
 /**
@@ -554,6 +600,10 @@ function renderConfigPage(): string {
       }
       * {
         box-sizing: border-box;
+      }
+      /* Keep hidden attributes authoritative over component display rules. */
+      [hidden] {
+        display: none !important;
       }
       body {
         margin: 0;
