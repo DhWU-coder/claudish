@@ -1360,6 +1360,86 @@ function renderConfigPage(): string {
         font-weight: 700;
         text-transform: uppercase;
       }
+      .provider-model-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: max-content;
+        max-width: 100%;
+        height: 30px;
+        padding: 0 9px;
+        background: transparent;
+        color: var(--text);
+        border-color: var(--line);
+      }
+      .provider-model-toggle::after {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        transform: rotate(45deg) translateY(-2px);
+      }
+      .provider-model-toggle.expanded::after {
+        transform: rotate(225deg) translate(-1px, -1px);
+      }
+      .provider-model-detail {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border-top: 1px solid var(--line);
+        background: color-mix(in srgb, var(--panel-2) 74%, transparent);
+      }
+      .provider-model-command-row {
+        display: grid;
+        grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 1fr) 34px;
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+        padding: 7px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+      }
+      .provider-model-command-row code,
+      .provider-model-command {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .provider-model-command {
+        color: var(--muted);
+      }
+      .copy-command-button {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+      }
+      .copy-command-button::before,
+      .copy-command-button::after {
+        content: "";
+        position: absolute;
+        width: 12px;
+        height: 14px;
+        border: 2px solid currentColor;
+        border-radius: 3px;
+      }
+      .copy-command-button::before {
+        transform: translate(3px, -3px);
+        opacity: 0.55;
+      }
+      .copy-command-button::after {
+        background: var(--panel);
+        transform: translate(-2px, 2px);
+      }
+      .copy-command-button.copied {
+        color: var(--accent-strong);
+        border-color: var(--accent);
+      }
       code {
         font-family: "SFMono-Regular", Consolas, monospace;
         font-size: 12px;
@@ -2047,6 +2127,7 @@ function renderConfigPage(): string {
       let usageState = null;
       let editingProviderId = "";
       let editingProviderSource = "";
+      let expandedProviderId = "";
       let providerModelDraft = [];
       let providerModelTestStates = new Map();
       let terminal = null;
@@ -2105,6 +2186,8 @@ function renderConfigPage(): string {
           "providers.modelCount": "Models",
           "providers.defaultModel": "Default model",
           "providers.actions": "Actions",
+          "providers.copyCommand": "Copy launch command",
+          "providers.copiedCommand": "Copied",
           "providers.edit": "Edit",
           "providers.delete": "Delete",
           "providerModal.title": "Custom Provider",
@@ -2187,6 +2270,7 @@ function renderConfigPage(): string {
           "status.providerDeleted": "Provider deleted.",
           "status.providerUpdated": "Provider updated.",
           "status.providerSaved": "Provider saved.",
+          "status.commandCopied": "Launch command copied.",
           "status.oauthLoginStarted": "OAuth login started...",
           "status.oauthLoginDone": "OAuth login completed.",
           "status.terminalStarted": "Chat session started.",
@@ -2225,6 +2309,8 @@ function renderConfigPage(): string {
           "providers.modelCount": "模型数",
           "providers.defaultModel": "默认模型",
           "providers.actions": "操作",
+          "providers.copyCommand": "复制启动命令",
+          "providers.copiedCommand": "已复制",
           "providers.edit": "编辑",
           "providers.delete": "删除",
           "providerModal.title": "自定义 Provider",
@@ -2307,6 +2393,7 @@ function renderConfigPage(): string {
           "status.providerDeleted": "Provider 已删除。",
           "status.providerUpdated": "Provider 已更新。",
           "status.providerSaved": "Provider 已保存。",
+          "status.commandCopied": "启动命令已复制。",
           "status.oauthLoginStarted": "正在启动 OAuth 登录...",
           "status.oauthLoginDone": "OAuth 登录完成。",
           "status.terminalStarted": "聊天会话已启动。",
@@ -2866,6 +2953,19 @@ function renderConfigPage(): string {
         list.appendChild(createProviderHeader(editable));
         for (const provider of providers) {
           list.appendChild(createProviderRow(provider, editable));
+          if (expandedProviderId === provider.id) {
+            list.appendChild(createProviderModelsDetailRow(provider));
+          }
+        }
+        for (const button of list.querySelectorAll("button[data-action='toggle-models']")) {
+          button.addEventListener("click", () => {
+            toggleProviderModels(button.dataset.id);
+          });
+        }
+        for (const button of list.querySelectorAll("button[data-action='copy-command']")) {
+          button.addEventListener("click", () => {
+            copyProviderCommand(button);
+          });
         }
         for (const button of list.querySelectorAll("button[data-action='delete']")) {
           button.addEventListener("click", async () => {
@@ -2915,7 +3015,7 @@ function renderConfigPage(): string {
           (provider.kind === "simple" ? provider.format : provider.transport || provider.kind);
         row.appendChild(codeCell(provider.id));
         row.appendChild(textCell(type || "-"));
-        row.appendChild(textCell(providerModelCount(provider)));
+        row.appendChild(providerModelCountButton(provider));
         row.appendChild(codeCell(provider.defaultModel || "-"));
         row.appendChild(editable ? providerActions(provider) : textCell(""));
         return row;
@@ -2923,8 +3023,115 @@ function renderConfigPage(): string {
 
       // Show provider capacity without implying one provider maps to one model.
       function providerModelCount(provider) {
-        const count = provider.models?.length || (provider.defaultModel ? 1 : 0);
+        const count = providerModelList(provider).length;
         return currentLanguage === "zh" ? count + " 个模型" : count + " models";
+      }
+
+      // Render the model-count cell as a disclosure control for model commands.
+      function providerModelCountButton(provider) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost provider-model-toggle";
+        button.dataset.action = "toggle-models";
+        button.dataset.id = provider.id;
+        button.disabled = providerModelList(provider).length === 0;
+        button.classList.toggle("expanded", expandedProviderId === provider.id);
+        button.setAttribute("aria-expanded", String(expandedProviderId === provider.id));
+        button.textContent = providerModelCount(provider);
+        return button;
+      }
+
+      // Keep one provider model detail open so the table stays easy to scan.
+      function toggleProviderModels(providerId) {
+        expandedProviderId = expandedProviderId === providerId ? "" : providerId;
+        renderProviders("#provider-summary", lastEditorState.customProviders, false);
+        renderProviders("#provider-list", lastEditorState.customProviders, true);
+      }
+
+      // Build the expanded model command panel under a provider row.
+      function createProviderModelsDetailRow(provider) {
+        const detail = document.createElement("div");
+        detail.className = "provider-model-detail";
+        for (const model of providerModelList(provider)) {
+          detail.appendChild(createProviderModelCommandRow(provider, model));
+        }
+        return detail;
+      }
+
+      // Build a single model row with its exact claudish launch command.
+      function createProviderModelCommandRow(provider, model) {
+        const row = document.createElement("div");
+        row.className = "provider-model-command-row";
+        const modelCode = codeCell(model);
+        modelCode.title = model;
+        const command = providerModelCommand(provider.id, model);
+        const commandCode = codeCell(command);
+        commandCode.className = "provider-model-command";
+        commandCode.title = command;
+        const copy = providerCommandCopyButton(command);
+        row.append(modelCode, commandCode, copy);
+        return row;
+      }
+
+      // Prefer explicit models, falling back to the default model for legacy config.
+      function providerModelList(provider) {
+        const models = provider.models?.length ? provider.models : [provider.defaultModel];
+        return Array.from(new Set(models.filter(Boolean)));
+      }
+
+      // Generate the command users can paste into a terminal.
+      function providerModelCommand(providerId, model) {
+        return "claudish --model " + providerId + "@" + model;
+      }
+
+      // Render a compact icon-only copy button with accessible text.
+      function providerCommandCopyButton(command) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost copy-command-button";
+        button.dataset.action = "copy-command";
+        button.dataset.command = command;
+        button.setAttribute("aria-label", t("providers.copyCommand") + ": " + command);
+        button.setAttribute("title", t("providers.copyCommand"));
+        const text = document.createElement("span");
+        text.className = "sr-only";
+        text.textContent = t("providers.copyCommand");
+        button.appendChild(text);
+        return button;
+      }
+
+      // Copy a generated command and show a short non-layout-shifting result.
+      async function copyProviderCommand(button) {
+        const command = button.dataset.command || "";
+        if (!command) return;
+        await writeClipboardText(command);
+        button.classList.add("copied");
+        button.setAttribute("title", t("providers.copiedCommand"));
+        const label = button.querySelector(".sr-only");
+        if (label) label.textContent = t("providers.copiedCommand");
+        setStatus(t("status.commandCopied"));
+        window.setTimeout(() => {
+          button.classList.remove("copied");
+          button.setAttribute("title", t("providers.copyCommand"));
+          if (label) label.textContent = t("providers.copyCommand");
+        }, 1400);
+      }
+
+      // Use the browser clipboard API, with an execCommand fallback for older WebViews.
+      async function writeClipboardText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
       }
 
       // Render monospace table cells for ids and model names.

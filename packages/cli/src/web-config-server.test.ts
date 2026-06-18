@@ -191,6 +191,28 @@ describe("web config server", () => {
     expect(html).not.toContain('<textarea id="provider-models"');
   });
 
+  test("GET / renders expandable provider model commands with icon copy buttons", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    // The configuration summary should let users inspect every model under a
+    // provider and copy the exact command without opening the edit modal.
+    expect(html).toContain("expandedProviderId");
+    expect(html).toContain("toggleProviderModels");
+    expect(html).toContain("createProviderModelsDetailRow");
+    expect(html).toContain("provider-model-toggle");
+    expect(html).toContain("provider-model-detail");
+    expect(html).toContain("provider-model-command");
+    expect(html).toContain("copy-command-button");
+    expect(html).toContain("copyProviderCommand");
+    expect(html).toContain("navigator.clipboard.writeText");
+    expect(html).toContain("providerModelCommand(provider.id, model)");
+    expect(html).toContain('"claudish --model " + providerId + "@" + model');
+    expect(html).toContain('"providers.copyCommand"');
+    expect(html).toContain('"providers.copiedCommand"');
+    expect(html).not.toContain('className = "copy-command-button">Copy');
+  });
+
   test("GET / renders OAuth provider modal controls", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
