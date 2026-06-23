@@ -7,7 +7,11 @@ config({ quiet: true }); // Loads .env from current working directory
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getFirstPositionalArg, isWebConfigCommand } from "./command-routing.js";
+import {
+  getFirstPositionalArg,
+  getServiceCommand,
+  isWebConfigCommand,
+} from "./command-routing.js";
 
 /**
  * Load API keys and custom endpoints from ~/.claudish/config.json into process.env.
@@ -59,6 +63,8 @@ function handlePromptExit(err: unknown): void {
 
 // Check for auth and profile management commands
 const args = process.argv.slice(2);
+const serviceCommand = getServiceCommand(args);
+const isServiceDaemonCommand = args.includes("--service-daemon");
 
 // Check for subcommands (can appear anywhere in args due to aliases like `claudish -y`)
 const isUpdateCommand = args.includes("update");
@@ -88,7 +94,23 @@ const isLegacyGeminiLogout = args.includes("--gemini-logout");
 const isLegacyKimiLogin = args.includes("--kimi-login");
 const isLegacyKimiLogout = args.includes("--kimi-logout");
 
-if (isMcpMode) {
+if (isServiceDaemonCommand) {
+  import("./service/daemon.js").then((m) =>
+    m.startServiceDaemon(parseServiceDaemonOptions(args)).catch(handleFatalServiceError)
+  );
+} else if (serviceCommand) {
+  import("./service/commands.js").then(async (m) => {
+    if (serviceCommand === "start") {
+      console.log(m.formatStartResult(await m.startServiceCommand()));
+    } else if (serviceCommand === "stop") {
+      console.log(await m.stopServiceCommand());
+    } else if (serviceCommand === "restart") {
+      console.log(await m.restartServiceCommand());
+    } else {
+      console.log(m.statusServiceCommand());
+    }
+  }).catch(handleFatalServiceError);
+} else if (isMcpMode) {
   // MCP server mode - dynamic import to keep CLI fast
   import("./mcp-server.js").then((mcp) => mcp.startMcpServer());
 } else if (isLoginCommand) {
@@ -163,6 +185,27 @@ if (isMcpMode) {
 } else {
   // CLI mode
   runCli();
+}
+
+function parseServiceDaemonOptions(args: string[]): { port?: number; cwd?: string } {
+  const port = getFlagValue(args, "--service-port");
+  const cwd = getFlagValue(args, "--service-cwd");
+
+  return {
+    port: port ? Number.parseInt(port, 10) : undefined,
+    cwd,
+  };
+}
+
+function getFlagValue(args: string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  if (index < 0) return undefined;
+  return args[index + 1];
+}
+
+function handleFatalServiceError(error: unknown): void {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isWebConfigCommand } from "./command-routing.js";
+import { getServiceCommand, isServiceCommand, isWebConfigCommand } from "./command-routing.js";
 
 describe("command routing helpers", () => {
   test("isWebConfigCommand accepts the top-level web alias", () => {
@@ -23,5 +23,21 @@ describe("command routing helpers", () => {
   test("isWebConfigCommand rejects web when it is a flag value", () => {
     // A model or profile named "web" should still go through normal CLI mode.
     expect(isWebConfigCommand(["--model", "web", "hello"])).toBe(false);
+  });
+
+  test("isServiceCommand accepts top-level lifecycle commands", () => {
+    expect(isServiceCommand(["start"])).toBe(true);
+    expect(isServiceCommand(["stop"])).toBe(true);
+    expect(isServiceCommand(["restart"])).toBe(true);
+    expect(isServiceCommand(["status"])).toBe(true);
+  });
+
+  test("isServiceCommand rejects option values", () => {
+    expect(isServiceCommand(["--model", "start", "hello"])).toBe(false);
+  });
+
+  test("getServiceCommand returns the lifecycle command", () => {
+    expect(getServiceCommand(["-y", "start"])).toBe("start");
+    expect(getServiceCommand(["--model", "status", "hello"])).toBeUndefined();
   });
 });

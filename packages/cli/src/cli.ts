@@ -1766,6 +1766,12 @@ CONFIGURATION:
   claudish config --web                      Open a local browser configuration UI
   claudish web                               Open a local browser configuration UI
 
+SERVICE:
+  claudish start                             Start the background Web UI and channels service
+  claudish stop                              Stop the background service
+  claudish restart                           Restart the background service
+  claudish status                            Show background service status
+
 UPDATE:
   claudish update          Check for updates and install latest version
 

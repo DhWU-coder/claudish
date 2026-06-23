@@ -16,6 +16,7 @@ export interface PythonTerminalCommandOptions extends TerminalModelInput {
   cols?: number;
   rows?: number;
   env?: NodeJS.ProcessEnv;
+  claudishArgs?: string[];
 }
 
 export interface PythonTerminalCommand {
@@ -126,7 +127,7 @@ export function buildPythonTerminalCommand(
     COLUMNS: String(cols),
     LINES: String(rows),
   };
-  const claudishArgs = ["claudish", "--model", model];
+  const claudishArgs = ["claudish", "--model", model, ...(options.claudishArgs ?? [])];
 
   return {
     command: process.env.PYTHON || "python3",

@@ -74,6 +74,8 @@ Claudish is a **BYOK AI coding assistant**:
 - ✅ **Context inheritance** - Runs in current directory with same `.claude` settings
 - ✅ **Claude Code flag passthrough** - Forward any Claude Code flag (`--agent`, `--effort`, `--permission-mode`, etc.) in any order
 - ✅ **Vision proxy** - Non-vision models automatically get image descriptions via Claude, so every model can "see"
+- ✅ **Background service** - `claudish start/stop/restart/status` runs the Web monitor and channels in the background
+- ✅ **Feishu channel** - Feishu WebSocket bot messages can drive real claudish CLI sessions; text and images are supported
 
 ## Installation
 
@@ -168,6 +170,37 @@ claudish --model openrouter@anthropic/claude-3.5-sonnet "review code"
 ```
 
 **Note:** In interactive mode, if `OPENROUTER_API_KEY` is not set, you'll be prompted to enter it. This makes first-time usage super simple!
+
+## Background Service And Feishu
+
+Use `claudish start` to run the local Web monitor and channel manager in the background. `claudish stop` stops it, `claudish restart` restarts it, and `claudish status` prints the pid, Web URL, log path, and channel status. The default Web port is `17888`; if it is occupied, Claudish warns and picks the next available port. Startup auto-launch is not enabled.
+
+The first Feishu integration uses WebSocket long connections. Feishu text and image messages are routed into real `claudish` CLI PTY sessions, matching the Web Chat behavior. Each direct chat gets one session, and each group shares one session. Voice and generic file messages are not handled yet. Images are downloaded under `.claudish/feishu-images/` in the channel working directory and passed to Claude Code as absolute paths.
+
+Configure the service in `~/.claudish/config.yaml`. See [`config-example.yaml`](config-example.yaml) for a commented template.
+
+```yaml
+service:
+  port: 17888
+  cwd: ~/.claudish/workspace
+
+channels:
+  feishu:
+    enabled: true
+    appId: cli_xxx
+    appSecret: xxx
+    botOpenId: ou_xxx
+    domain: feishu
+    model: cx@gpt-5.5
+    cwd: ~/.claudish/workspace
+```
+
+If `service.cwd` is omitted, Claudish uses `~/.claudish/workspace` and creates it on service startup. If `channels.feishu.cwd` is omitted, it inherits `service.cwd`.
+
+```bash
+claudish start
+claudish web
+```
 
 ## AI Agent Usage
 

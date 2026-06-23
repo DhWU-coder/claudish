@@ -83,6 +83,10 @@ These are top-level subcommands recognized before flag parsing begins (checked i
 | `claudish profile show [name] [--local\|--global]` | Show profile details (models, timestamps) |
 | `claudish profile edit [name] [--local\|--global]` | Edit a profile interactively |
 | `claudish update` | Check for updates and install the latest version (detects npm, bun, brew) |
+| `claudish start` | Start the background Web UI and channel service |
+| `claudish stop` | Stop the background service |
+| `claudish restart` | Restart the background service |
+| `claudish status` | Show background service pid, Web URL, log path, and channel status |
 | `claudish telemetry on` | Enable telemetry (opt-in) |
 | `claudish telemetry off` | Disable telemetry |
 | `claudish telemetry status` | Show current telemetry consent and configuration |
@@ -118,6 +122,28 @@ Claudish automatically loads `.env` from the current working directory at startu
 | `CLAUDISH_LOCAL_QUEUE_ENABLED` | Enable/disable local model request queue (`false` or `0` to disable) | `true` |
 | `CLAUDISH_LOCAL_MAX_PARALLEL` | Max concurrent local model requests (integer 1–8; values above 8 are capped) | `1` |
 | `CLAUDISH_QWEN_NO_THINK` | Prepend `/no_think` to system prompt for Qwen local models (set to `"1"`) | none |
+
+### 3.1.1 Background Service Config
+
+The background service and channel integrations are configured from `~/.claudish/config.yaml`. See [`../config-example.yaml`](../config-example.yaml) for a commented template.
+
+```yaml
+service:
+  port: 17888
+  cwd: ~/.claudish/workspace
+
+channels:
+  feishu:
+    enabled: true
+    appId: cli_xxx
+    appSecret: xxx
+    botOpenId: ou_xxx
+    domain: feishu
+    model: cx@gpt-5.5
+    cwd: ~/.claudish/workspace
+```
+
+Config priority is `config.yaml` first, then legacy environment fallbacks, then defaults. If `service.cwd` is omitted, Claudish uses `~/.claudish/workspace` and creates it on service startup. If `channels.feishu.cwd` is omitted, it inherits `service.cwd`.
 
 ### 3.2 Claude Code Compatibility Variables
 
@@ -164,6 +190,21 @@ Claudish automatically loads `.env` from the current working directory at startu
 | `VERTEX_LOCATION` | Vertex AI region | `us-central1` | |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service account JSON file (Vertex OAuth) | | GCP Console |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID (also used by Gemini Code Assist OAuth) | `GOOGLE_CLOUD_PROJECT_ID` | |
+
+### 3.3.1 Feishu Channel Legacy Environment Fallbacks
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `FEISHU_APP_ID` | Feishu/Lark app id for WebSocket long connection mode | none |
+| `FEISHU_APP_SECRET` | Feishu/Lark app secret for WebSocket long connection mode | none |
+| `FEISHU_BOT_OPEN_ID` | Bot open id for group mention filtering; `CLAUDISH_FEISHU_BOT_OPEN_ID` also works | none |
+| `FEISHU_DOMAIN` | SDK domain, either `feishu` or `lark` | `feishu` |
+| `CLAUDISH_SERVICE_PORT` | Preferred background service Web port when `config.yaml` omits `service.port` | `17888` |
+| `CLAUDISH_FEISHU_MODEL` | Model used by Feishu channel PTY sessions when `config.yaml` omits `channels.feishu.model` | `CLAUDISH_MODEL` or `cx@gpt-5.5` |
+| `CLAUDISH_FEISHU_CWD` | Working directory used when `config.yaml` omits `channels.feishu.cwd` | `service.cwd` |
+| `CLAUDISH_FEISHU_BOT_OPEN_ID` | Feishu bot open id alias for group mention filtering | none |
+
+Feishu messages are routed to real claudish CLI PTY sessions. Direct chats get one session per sender, and group chats share one session per group. Text and image messages are supported in the first version; images are stored under `.claudish/feishu-images/` in the configured working directory.
 
 **Note on Vertex AI**: Vertex supports two authentication modes:
 - Express mode (`VERTEX_API_KEY`): Uses the Gemini API endpoint; supports Gemini models only.

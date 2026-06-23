@@ -263,6 +263,20 @@ describe("web config server", () => {
     expect(html).not.toContain('id="chat-form"');
   });
 
+  test("GET / renders channels monitor without removing chat terminal", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    expect(html).toContain('data-tab="channels"');
+    expect(html).toContain('id="panel-channels"');
+    expect(html).toContain('id="channels-status"');
+    expect(html).toContain('id="channel-feishu-status"');
+    expect(html).toContain("loadChannels");
+    expect(html).toContain("/api/channels");
+    expect(html).toContain('id="terminal-start"');
+    expect(html).toContain('id="terminal"');
+  });
+
   test("GET / renders terminal restart behavior for model changes", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -481,6 +495,19 @@ describe("web config server", () => {
     expect(body.byModel[0].name).toBe("cx@gpt-5.5");
     expect(body.timeline[0].key).toBe("2026-06-17");
     expect(body.recent[0].requestId).toBe("req-usage");
+  });
+
+  test("GET /api/channels returns channel status", async () => {
+    const response = await handleConfigWebRequest(request("/api/channels"), {
+      channelStatusProvider: () => ({
+        channels: [{ id: "feishu", status: "connected", activeSessions: 1 }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      channels: [{ id: "feishu", status: "connected", activeSessions: 1 }],
+    });
   });
 
   test("GET /api/config includes model options from defaults and custom providers", async () => {

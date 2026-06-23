@@ -3,6 +3,9 @@
  */
 
 const COMMAND_PREFIX_FLAGS = new Set(["-y", "--auto-approve", "--no-auto-approve", "--dangerous"]);
+const SERVICE_COMMANDS = new Set(["start", "stop", "restart", "status"]);
+
+export type ServiceCommand = "start" | "stop" | "restart" | "status";
 
 /**
  * Return the first non-flag argument while preserving aliases such as `-y web`.
@@ -21,6 +24,18 @@ export function isWebConfigCommand(args: string[]): boolean {
 
   const configArgIndex = args.indexOf("config");
   return args.includes("--web") || args[configArgIndex + 1] === "web";
+}
+
+export function getServiceCommand(args: string[]): ServiceCommand | undefined {
+  for (const command of SERVICE_COMMANDS) {
+    if (isTopLevelAlias(args, command)) return command as ServiceCommand;
+  }
+
+  return undefined;
+}
+
+export function isServiceCommand(args: string[]): boolean {
+  return getServiceCommand(args) !== undefined;
 }
 
 /**

@@ -1,0 +1,25 @@
+# Claudish 后台服务与 Channels 示例配置
+# 实际使用时放到 ~/.claudish/config.yaml
+
+service:
+  # Web 监控界面的优先端口；如果被占用，claudish start 会提示 warning 并自动换到下一个可用端口。
+  port: 17888
+  # 后台服务默认工作目录；不写时也会默认使用 ~/.claudish/workspace。
+  cwd: ~/.claudish/workspace
+
+channels:
+  feishu:
+    # true 表示启动时连接飞书 WebSocket；改成 false 可以临时关闭飞书通道。
+    enabled: true
+    # 飞书开放平台应用的 App ID，一般形如 cli_xxx。
+    appId: cli_xxx
+    # 飞书开放平台应用的 App Secret；建议只放在本机 ~/.claudish/config.yaml，不要提交真实密钥。
+    appSecret: your_app_secret
+    # 机器人 open_id，用来判断群聊里是不是 @ 了机器人；私聊不依赖这个字段。
+    botOpenId: ou_xxx
+    # 国内飞书用 feishu，国际版 Lark 用 lark。
+    domain: feishu
+    # 飞书消息进入 claudish CLI PTY 时使用的模型；不写时使用 CLAUDISH_MODEL 或 cx@gpt-5.5。
+    model: cx@gpt-5.5
+    # 飞书会话的工作目录；不写时继承 service.cwd，图片也会缓存到这个目录下。
+    cwd: ~/.claudish/workspace

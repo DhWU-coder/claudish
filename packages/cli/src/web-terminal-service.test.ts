@@ -51,6 +51,17 @@ describe("web terminal service", () => {
     expect(command.args.slice(2)).toEqual(["claudish", "--model", "corp@model with spaces"]);
   });
 
+  test("buildPythonTerminalCommand accepts extra claudish args", () => {
+    const command = buildPythonTerminalCommand({
+      provider: "cx",
+      model: "gpt-5.5",
+      claudishArgs: ["--debug"],
+      env: {},
+    });
+
+    expect(command.args.slice(2)).toEqual(["claudish", "--model", "cx@gpt-5.5", "--debug"]);
+  });
+
   test("parseTerminalSocketMessage accepts typed input payloads", () => {
     // Browser WebSocket messages carry raw terminal input inside JSON envelopes.
     expect(parseTerminalSocketMessage(JSON.stringify({ type: "input", data: "hello" }))).toEqual({

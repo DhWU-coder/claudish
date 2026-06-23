@@ -68,6 +68,14 @@ interface ProviderProbeResult {
 
 /** Runs a tiny real provider/model probe, injectable so tests never call LLMs. */
 type ProviderProbeRunner = (input: ProviderProbeInput) => Promise<ProviderProbeResult>;
+type ChannelStatusProvider = () => {
+  channels: Array<{
+    id: string;
+    status: string;
+    activeSessions?: number;
+    [key: string]: unknown;
+  }>;
+};
 
 interface TerminalSocketData {
   provider: string;
@@ -89,12 +97,14 @@ export interface ConfigWebServerOptions {
   terminalSessionFactory?: TerminalSessionFactory;
   terminalWorkingDirectory?: string;
   usageProjectRoot?: string;
+  channelStatusProvider?: ChannelStatusProvider;
 }
 
 export interface ConfigWebRequestOptions {
   providerProbeRunner?: ProviderProbeRunner;
   oauthLogin?: OAuthLoginHandler;
   usageProjectRoot?: string;
+  channelStatusProvider?: ChannelStatusProvider;
 }
 
 /**
@@ -155,6 +165,14 @@ function handleGetRequest(url: URL, options: ConfigWebRequestOptions): Response 
 
   if (url.pathname === "/api/usage") {
     return jsonResponse(getUsageDashboard(usageDashboardOptionsFromUrl(url, options)));
+  }
+
+  if (url.pathname === "/api/channels") {
+    return jsonResponse(
+      options.channelStatusProvider?.() ?? {
+        channels: [{ id: "feishu", status: "not_configured", activeSessions: 0 }],
+      }
+    );
   }
 
   if (url.pathname.startsWith("/api/custom-providers/") && url.pathname.endsWith("/secret")) {
@@ -245,6 +263,7 @@ export function startConfigWebServer(
         providerProbeRunner: options.providerProbeRunner,
         oauthLogin: options.oauthLogin,
         usageProjectRoot,
+        channelStatusProvider: options.channelStatusProvider,
       });
     },
     websocket: createTerminalWebSocketHandler(terminalSessionFactory),
@@ -1464,6 +1483,27 @@ function renderConfigPage(): string {
         gap: 8px;
         align-items: end;
       }
+      .channels-grid {
+        display: grid;
+        grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+        gap: 16px;
+        align-items: start;
+      }
+      .channel-summary {
+        display: grid;
+        gap: 10px;
+        min-height: 94px;
+      }
+      .channel-status-row {
+        display: grid;
+        grid-template-columns: 120px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+      }
+      .channel-status-row span:first-child {
+        color: var(--muted);
+        font-size: 12px;
+      }
       .usage-shell {
         display: grid;
         gap: 18px;
@@ -1844,6 +1884,7 @@ function renderConfigPage(): string {
         <button class="tab active" data-tab="usage" type="button" data-i18n="tabs.usage">Usage</button>
         <button class="tab" data-tab="config" type="button" data-i18n="tabs.config">Config</button>
         <button class="tab" data-tab="providers" type="button" data-i18n="tabs.providers">Providers</button>
+        <button class="tab" data-tab="channels" type="button" data-i18n="tabs.channels">Channels</button>
         <button class="tab" data-tab="chat" type="button" data-i18n="tabs.chat">Chat</button>
       </nav>
 
@@ -1887,6 +1928,22 @@ function renderConfigPage(): string {
           </div>
           <div class="table" id="provider-list"></div>
         </section>
+      </section>
+
+      <section class="panel" id="panel-channels">
+        <div class="channels-grid">
+          <section>
+            <div class="section-head">
+              <h2 data-i18n="channels.title">Channels</h2>
+              <button class="ghost" id="channels-refresh" type="button" data-i18n="channels.refresh">Refresh</button>
+            </div>
+            <div class="source" id="channels-status" data-i18n="channels.loading">Loading channel status.</div>
+          </section>
+          <section class="channel-summary" id="channel-feishu-status">
+            <h2 data-i18n="channels.feishu">Feishu</h2>
+            <div class="source" data-i18n="channels.loading">Loading channel status.</div>
+          </section>
+        </div>
       </section>
 
       <section class="panel" id="panel-chat">
@@ -2082,6 +2139,7 @@ function renderConfigPage(): string {
       // Keep browser-side state tiny and derived from the JSON API.
       let currentState = null;
       let usageState = null;
+      let channelsState = null;
       let editingProviderId = "";
       let editingProviderSource = "";
       let expandedProviderId = "";
@@ -2124,6 +2182,7 @@ function renderConfigPage(): string {
           "app.title": "Claudish Config",
           "tabs.config": "Config",
           "tabs.providers": "Providers",
+          "tabs.channels": "Channels",
           "tabs.chat": "Chat",
           "tabs.usage": "Usage",
           "theme.toLight": "Switch to light theme",
@@ -2182,6 +2241,15 @@ function renderConfigPage(): string {
           "terminal.connected": "Connected.",
           "terminal.closed": "Chat session closed.",
           "terminal.unavailable": "Chat terminal library failed to load.",
+          "channels.title": "Channels",
+          "channels.refresh": "Refresh",
+          "channels.feishu": "Feishu",
+          "channels.loading": "Loading channel status.",
+          "channels.none": "No channels configured.",
+          "channels.status": "Status",
+          "channels.sessions": "Sessions",
+          "channels.model": "Model",
+          "channels.cwd": "Working directory",
           "usage.title": "Usage Dashboard",
           "usage.refresh": "Refresh",
           "usage.range": "Range",
@@ -2247,6 +2315,7 @@ function renderConfigPage(): string {
           "app.title": "Claudish 配置",
           "tabs.config": "配置",
           "tabs.providers": "Provider",
+          "tabs.channels": "频道",
           "tabs.chat": "聊天",
           "tabs.usage": "用量",
           "theme.toLight": "切换到浅色主题",
@@ -2305,6 +2374,15 @@ function renderConfigPage(): string {
           "terminal.connected": "已连接。",
           "terminal.closed": "聊天会话已关闭。",
           "terminal.unavailable": "聊天终端库加载失败。",
+          "channels.title": "频道",
+          "channels.refresh": "刷新",
+          "channels.feishu": "飞书",
+          "channels.loading": "正在加载频道状态。",
+          "channels.none": "还没有配置频道。",
+          "channels.status": "状态",
+          "channels.sessions": "会话",
+          "channels.model": "模型",
+          "channels.cwd": "工作目录",
           "usage.title": "用量看板",
           "usage.refresh": "刷新",
           "usage.range": "范围",
@@ -2400,6 +2478,9 @@ function renderConfigPage(): string {
       const terminalStopEl = document.querySelector("#terminal-stop");
       const terminalStatusEl = document.querySelector("#terminal-status");
       const terminalMountEl = document.querySelector("#terminal");
+      const channelsRefreshEl = document.querySelector("#channels-refresh");
+      const channelsStatusEl = document.querySelector("#channels-status");
+      const channelFeishuStatusEl = document.querySelector("#channel-feishu-status");
       const usageRefreshEl = document.querySelector("#usage-refresh");
       const usagePresetButtonsEl = document.querySelector("#usage-preset-buttons");
       const usageRecentValueEl = document.querySelector("#usage-recent-value");
@@ -2470,6 +2551,7 @@ function renderConfigPage(): string {
         renderEffectiveDefaults(lastEditorState);
         renderTerminalStatus(terminalSocket ? "connected" : "disconnected");
         if (usageState) renderUsageDashboard(usageState);
+        if (channelsState) renderChannels(channelsState);
         if (lastEditorState) {
           renderProviders("#provider-summary", lastEditorState.customProviders, false);
           renderProviders("#provider-list", lastEditorState.customProviders, true);
@@ -2521,6 +2603,9 @@ function renderConfigPage(): string {
         if (tabName === "chat") fitTerminalSoon();
         if (tabName === "usage" && !usageState) {
           loadUsageDashboard().catch((err) => setStatus(err.message, true));
+        }
+        if (tabName === "channels" && !channelsState) {
+          loadChannels().catch((err) => setStatus(err.message, true));
         }
       }
 
@@ -3328,6 +3413,52 @@ function renderConfigPage(): string {
         renderUsageDashboard(dashboard);
       }
 
+      // 拉取后台服务中的频道状态。
+      async function loadChannels() {
+        const status = await requestJson("/api/channels");
+        channelsState = status;
+        renderChannels(status);
+      }
+
+      // 渲染 Feishu 等外部频道的运行状态。
+      function renderChannels(status) {
+        const channels = Array.isArray(status?.channels) ? status.channels : [];
+        channelsStatusEl.textContent =
+          channels.length === 0 ? t("channels.none") : t("usage.requestCount", { count: channels.length });
+        const feishu = channels.find((channel) => channel.id === "feishu") || {
+          id: "feishu",
+          status: "not_configured",
+          activeSessions: 0,
+        };
+        channelFeishuStatusEl.replaceChildren(
+          channelRowTitle(t("channels.feishu")),
+          channelStatusRow(t("channels.status"), feishu.status || "unknown"),
+          channelStatusRow(t("channels.sessions"), String(feishu.activeSessions || 0)),
+          channelStatusRow(t("channels.model"), feishu.model || "-"),
+          channelStatusRow(t("channels.cwd"), feishu.cwd || "-")
+        );
+      }
+
+      // 生成频道面板标题。
+      function channelRowTitle(text) {
+        const title = document.createElement("h2");
+        title.textContent = text;
+        return title;
+      }
+
+      // 生成频道状态的紧凑键值行。
+      function channelStatusRow(label, value) {
+        const row = document.createElement("div");
+        row.className = "channel-status-row";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const content = document.createElement("code");
+        content.textContent = value;
+        content.title = value;
+        row.append(name, content);
+        return row;
+      }
+
       // Keep the API query as the single source of truth for dashboard filters.
       function buildUsageQuery() {
         const params = new URLSearchParams({
@@ -4082,6 +4213,9 @@ function renderConfigPage(): string {
       // Wire terminal controls and keep the PTY view fitted to the browser.
       terminalStartEl.addEventListener("click", startTerminalSession);
       terminalStopEl.addEventListener("click", () => stopTerminalSession(true));
+      channelsRefreshEl.addEventListener("click", () => {
+        loadChannels().catch((err) => setStatus(err.message, true));
+      });
 
       // Wire usage filters so every change refreshes the same dashboard API.
       usagePresetButtonsEl.addEventListener("click", (event) => {
@@ -4135,6 +4269,7 @@ function renderConfigPage(): string {
       applyLanguage(detectInitialLanguage());
       loadState().catch((err) => setStatus(err.message, true));
       loadUsageDashboard().catch((err) => setStatus(err.message, true));
+      loadChannels().catch((err) => setStatus(err.message, true));
     </script>
   </body>
 </html>`;
