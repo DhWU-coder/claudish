@@ -815,9 +815,8 @@ describe("web config server", () => {
     expect(body.error).toContain("OPENAI_CODEX_API_KEY");
   });
 
-  test("POST /api/chat streams through the injected chat service", async () => {
-    // The Web UI endpoint is transport-agnostic here; the real service is
-    // covered separately and this test pins the HTTP contract.
+  test("POST /api/chat returns not found after legacy chat endpoint removal", async () => {
+    // Web Chat 现在由 /api/terminal 驱动真实 claudish 会话，旧的纯代理聊天接口不再暴露。
     const response = await handleConfigWebRequest(
       request("/api/chat", {
         method: "POST",
@@ -827,16 +826,11 @@ describe("web config server", () => {
           messages: [{ role: "user", content: "hello" }],
         }),
       }),
-      {
-        chatService: {
-          streamChat: () => new Response("data: hello\n\ndata: [DONE]\n\n"),
-        },
-      }
     );
+    const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(await response.text()).toContain("hello");
+    expect(response.status).toBe(404);
+    expect(body.error).toBe("Not found");
   });
 
   test("POST /api/provider-test probes through claudish CLI with provider-prefixed model", async () => {
@@ -862,11 +856,6 @@ describe("web config server", () => {
         }),
       }),
       {
-        // This chatService prevents accidental network work while proving the
-        // provider test no longer relies on the browser chat proxy path.
-        chatService: {
-          streamChat: () => new Response("chat-service should not be used", { status: 500 }),
-        },
         // The test runner stands in for the real claudish child process.
         providerProbeRunner: async (input) => {
           capturedProvider = input.provider;

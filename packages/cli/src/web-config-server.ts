@@ -21,11 +21,6 @@ import {
 import type { CustomEndpointSimple } from "./config-schema.js";
 import { type ClaudishProfileConfig, loadConfig } from "./profile-config.js";
 import {
-  type WebChatRequest,
-  type WebChatService,
-  createProxyBackedChatService,
-} from "./web-chat-service.js";
-import {
   type CreatePythonTerminalSessionOptions,
   type WebTerminalSession,
   createPythonTerminalSession,
@@ -85,7 +80,6 @@ interface TerminalSocketData {
 
 export interface ConfigWebServerOptions {
   port?: number;
-  chatService?: WebChatService;
   providerProbeRunner?: ProviderProbeRunner;
   /** Whether to open the local Web UI after binding the server port. */
   openBrowser?: boolean;
@@ -98,7 +92,6 @@ export interface ConfigWebServerOptions {
 }
 
 export interface ConfigWebRequestOptions {
-  chatService?: WebChatService;
   providerProbeRunner?: ProviderProbeRunner;
   oauthLogin?: OAuthLoginHandler;
   usageProjectRoot?: string;
@@ -119,11 +112,6 @@ export async function handleConfigWebRequest(
     return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 }
-
-/**
- * Default chat service is lazy, so importing the Web UI does not start a proxy.
- */
-const defaultChatService = createProxyBackedChatService();
 
 /**
  * Dispatch a Web UI request after top-level error handling is established.
@@ -207,10 +195,6 @@ function handlePostRequest(
     );
   }
 
-  if (url.pathname === "/api/chat") {
-    return handleChatPost(request, options.chatService ?? defaultChatService);
-  }
-
   return jsonResponse({ error: "Not found" }, 404);
 }
 
@@ -236,7 +220,6 @@ function usageDashboardOptionsFromUrl(url: URL, options: ConfigWebRequestOptions
 export function startConfigWebServer(
   options: ConfigWebServerOptions = {}
 ): ReturnType<typeof Bun.serve> {
-  const chatService = options.chatService ?? createProxyBackedChatService();
   const terminalSessionFactory = options.terminalSessionFactory ?? createPythonTerminalSession;
   const usageProjectRoot = options.usageProjectRoot ?? resolveClaudishProjectRoot();
   const terminalWorkingDirectory =
@@ -259,7 +242,6 @@ export function startConfigWebServer(
       }
 
       return handleConfigWebRequest(request, {
-        chatService,
         providerProbeRunner: options.providerProbeRunner,
         oauthLogin: options.oauthLogin,
         usageProjectRoot,
@@ -515,14 +497,6 @@ function decodeCustomProviderSecretId(url: URL): string | undefined {
 }
 
 /**
- * Stream a real chat request through the configured chat service.
- */
-async function handleChatPost(request: Request, chatService: WebChatService): Promise<Response> {
-  const body = await readJson<WebChatRequest>(request);
-  return ensureEventStreamResponse(await chatService.streamChat(body));
-}
-
-/**
  * Run a tiny provider/model probe through the real claudish CLI path.
  */
 async function handleProviderTestPost(
@@ -734,23 +708,6 @@ function compactProbeOutput(text: string): string {
  */
 function stringField(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-/**
- * Ensure browser chat fetches can treat every chat response as an SSE stream.
- */
-function ensureEventStreamResponse(response: Response): Response {
-  if (response.headers.get("content-type")) {
-    return response;
-  }
-
-  const headers = new Headers(response.headers);
-  headers.set("content-type", "text/event-stream; charset=utf-8");
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
 }
 
 /**
