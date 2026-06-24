@@ -273,6 +273,12 @@ describe("web config server", () => {
     expect(html).toContain('id="channel-feishu-status"');
     expect(html).toContain("loadChannels");
     expect(html).toContain("/api/channels");
+    expect(html).toContain('id="channel-feishu-messages"');
+    expect(html).toContain("renderFeishuMessages");
+    expect(html).toContain("toggleFeishuMessageError");
+    expect(html).toContain("channel-message-error-button");
+    expect(html).toContain('"channels.messages"');
+    expect(html).toContain('"channels.messageDetails"');
     expect(html).toContain('id="terminal-start"');
     expect(html).toContain('id="terminal"');
   });

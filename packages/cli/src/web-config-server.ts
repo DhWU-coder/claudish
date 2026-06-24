@@ -1504,6 +1504,115 @@ function renderConfigPage(): string {
         color: var(--muted);
         font-size: 12px;
       }
+      .channel-messages {
+        grid-column: 1 / -1;
+        min-width: 0;
+      }
+      .channel-message-table-wrap {
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .channel-message-table {
+        width: 100%;
+        min-width: 920px;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      .channel-message-table th,
+      .channel-message-table td {
+        overflow: hidden;
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .channel-message-table th {
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+      .channel-message-table tr:last-child td {
+        border-bottom: 0;
+      }
+      .channel-message-stage {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+        height: 24px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .channel-message-stage.completed {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .channel-message-stage.failed {
+        border-color: var(--danger);
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+      .channel-message-stage.stopped {
+        color: var(--muted);
+      }
+      .channel-message-error-button {
+        width: 100%;
+        height: 26px;
+        justify-content: flex-start;
+        overflow: hidden;
+        padding: 0 8px;
+        color: var(--danger);
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .channel-message-detail-row td {
+        padding: 0;
+        background: var(--panel-2);
+      }
+      .channel-message-detail {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border-top: 1px solid var(--line);
+      }
+      .channel-message-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .channel-message-detail-item {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+      }
+      .channel-message-detail-item span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .channel-message-detail-item code,
+      .channel-message-error-text {
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+      .channel-message-error-text {
+        margin: 0;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--field);
+        color: var(--danger);
+        font: 12px/1.45 "SFMono-Regular", Consolas, monospace;
+      }
       .usage-shell {
         display: grid;
         gap: 18px;
@@ -1829,6 +1938,7 @@ function renderConfigPage(): string {
           padding: 16px;
         }
         .config-grid,
+        .channels-grid,
         .terminal-toolbar,
         .usage-filter,
         .usage-main-grid,
@@ -1849,6 +1959,9 @@ function renderConfigPage(): string {
         }
         .usage-model-filter {
           width: 100%;
+        }
+        .channel-message-detail-grid {
+          grid-template-columns: 1fr;
         }
         .terminal-meta {
           justify-content: flex-start;
@@ -1942,6 +2055,33 @@ function renderConfigPage(): string {
           <section class="channel-summary" id="channel-feishu-status">
             <h2 data-i18n="channels.feishu">Feishu</h2>
             <div class="source" data-i18n="channels.loading">Loading channel status.</div>
+          </section>
+          <section class="channel-messages">
+            <div class="section-head">
+              <h2 data-i18n="channels.messages">Recent Feishu Messages</h2>
+              <div class="source" id="channel-feishu-message-count" data-i18n="channels.loading">Loading channel status.</div>
+            </div>
+            <div class="channel-message-table-wrap">
+              <table class="channel-message-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="channels.messageAccount">Account</th>
+                    <th data-i18n="channels.messageSource">Source</th>
+                    <th data-i18n="channels.messageSender">Sender</th>
+                    <th data-i18n="channels.messagePreview">Message</th>
+                    <th data-i18n="channels.messageImages">Images</th>
+                    <th data-i18n="channels.messageStage">Stage</th>
+                    <th data-i18n="channels.messageElapsed">Elapsed</th>
+                    <th data-i18n="channels.messageError">Error</th>
+                  </tr>
+                </thead>
+                <tbody id="channel-feishu-messages">
+                  <tr>
+                    <td colspan="8" data-i18n="channels.loading">Loading channel status.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </section>
         </div>
       </section>
@@ -2150,6 +2290,8 @@ function renderConfigPage(): string {
       let terminalSocket = null;
       let terminalInputDisposable = null;
       let terminalResizeDisposable = null;
+      let channelsRefreshTimer = null;
+      let expandedFeishuMessageErrors = new Set();
       let currentLanguage = "en";
       let lastEditorState = null;
       const usageFilters = {
@@ -2250,6 +2392,31 @@ function renderConfigPage(): string {
           "channels.sessions": "Sessions",
           "channels.model": "Model",
           "channels.cwd": "Working directory",
+          "channels.messages": "Recent Feishu Messages",
+          "channels.messageCount": "{count} messages",
+          "channels.messageEmpty": "No handled Feishu messages yet.",
+          "channels.messageAccount": "Account",
+          "channels.messageSource": "Source",
+          "channels.messageSender": "Sender",
+          "channels.messagePreview": "Message",
+          "channels.messageImages": "Images",
+          "channels.messageStage": "Stage",
+          "channels.messageElapsed": "Elapsed",
+          "channels.messageError": "Error",
+          "channels.messageDetails": "Error details",
+          "channels.messageId": "Message ID",
+          "channels.messageConversation": "Conversation",
+          "channels.messageReceivedAt": "Received",
+          "channels.messageSource.group": "Group",
+          "channels.messageSource.direct": "DM",
+          "channels.messageStage.received": "Received",
+          "channels.messageStage.downloading_images": "Downloading",
+          "channels.messageStage.queued": "Queued",
+          "channels.messageStage.model_processing": "Model",
+          "channels.messageStage.replying": "Replying",
+          "channels.messageStage.completed": "Done",
+          "channels.messageStage.failed": "Failed",
+          "channels.messageStage.stopped": "Stopped",
           "usage.title": "Usage Dashboard",
           "usage.refresh": "Refresh",
           "usage.range": "Range",
@@ -2383,6 +2550,31 @@ function renderConfigPage(): string {
           "channels.sessions": "会话",
           "channels.model": "模型",
           "channels.cwd": "工作目录",
+          "channels.messages": "最近飞书消息",
+          "channels.messageCount": "{count} 条消息",
+          "channels.messageEmpty": "还没有进入处理流程的飞书消息。",
+          "channels.messageAccount": "账号",
+          "channels.messageSource": "来源",
+          "channels.messageSender": "发送人",
+          "channels.messagePreview": "消息",
+          "channels.messageImages": "图片",
+          "channels.messageStage": "阶段",
+          "channels.messageElapsed": "耗时",
+          "channels.messageError": "错误",
+          "channels.messageDetails": "错误详情",
+          "channels.messageId": "消息 ID",
+          "channels.messageConversation": "会话",
+          "channels.messageReceivedAt": "接收时间",
+          "channels.messageSource.group": "群聊",
+          "channels.messageSource.direct": "私聊",
+          "channels.messageStage.received": "已接收",
+          "channels.messageStage.downloading_images": "下载图片",
+          "channels.messageStage.queued": "排队",
+          "channels.messageStage.model_processing": "模型处理中",
+          "channels.messageStage.replying": "回复中",
+          "channels.messageStage.completed": "完成",
+          "channels.messageStage.failed": "失败",
+          "channels.messageStage.stopped": "已停止",
           "usage.title": "用量看板",
           "usage.refresh": "刷新",
           "usage.range": "范围",
@@ -2481,6 +2673,8 @@ function renderConfigPage(): string {
       const channelsRefreshEl = document.querySelector("#channels-refresh");
       const channelsStatusEl = document.querySelector("#channels-status");
       const channelFeishuStatusEl = document.querySelector("#channel-feishu-status");
+      const channelFeishuMessagesEl = document.querySelector("#channel-feishu-messages");
+      const channelFeishuMessageCountEl = document.querySelector("#channel-feishu-message-count");
       const usageRefreshEl = document.querySelector("#usage-refresh");
       const usagePresetButtonsEl = document.querySelector("#usage-preset-buttons");
       const usageRecentValueEl = document.querySelector("#usage-recent-value");
@@ -2600,6 +2794,7 @@ function renderConfigPage(): string {
           panel.classList.toggle("active", panel.id === "panel-" + tabName);
         }
         document.body.classList.toggle("chat-active", tabName === "chat");
+        syncChannelsPolling(tabName);
         if (tabName === "chat") fitTerminalSoon();
         if (tabName === "usage" && !usageState) {
           loadUsageDashboard().catch((err) => setStatus(err.message, true));
@@ -2607,6 +2802,18 @@ function renderConfigPage(): string {
         if (tabName === "channels" && !channelsState) {
           loadChannels().catch((err) => setStatus(err.message, true));
         }
+      }
+
+      // 只在 Channels 页面打开时轮询，避免其他页面产生不必要请求。
+      function syncChannelsPolling(tabName) {
+        if (channelsRefreshTimer) {
+          clearInterval(channelsRefreshTimer);
+          channelsRefreshTimer = null;
+        }
+        if (tabName !== "channels") return;
+        channelsRefreshTimer = setInterval(() => {
+          loadChannels().catch((err) => setStatus(err.message, true));
+        }, 2000);
       }
 
       // Apply the persisted theme, or fall back to the browser preference.
@@ -3442,14 +3649,166 @@ function renderConfigPage(): string {
             channelStatusRow(t("channels.cwd"), feishu.cwd || "-"),
           ])
         );
+        renderFeishuMessages(feishuChannels);
+      }
+
+      // 渲染真正进入处理流程的飞书消息，不展示被忽略的群消息。
+      function renderFeishuMessages(feishuChannels) {
+        const messages = feishuChannels
+          .flatMap((channel) => {
+            const accountId = channel.accountId || resolveFeishuAccountId(channel);
+            return Array.isArray(channel.recentMessages)
+              ? channel.recentMessages.map((message) => ({
+                  ...message,
+                  accountId: message.accountId || accountId,
+                }))
+              : [];
+          })
+          .sort((left, right) => Number(right.receivedAt || 0) - Number(left.receivedAt || 0));
+
+        channelFeishuMessageCountEl.textContent = t("channels.messageCount", {
+          count: String(messages.length),
+        });
+        channelFeishuMessagesEl.replaceChildren();
+        if (messages.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 8;
+          cell.textContent = t("channels.messageEmpty");
+          row.appendChild(cell);
+          channelFeishuMessagesEl.appendChild(row);
+          return;
+        }
+
+        for (const message of messages) {
+          channelFeishuMessagesEl.append(...createFeishuMessageRows(message));
+        }
+      }
+
+      // 生成单条飞书消息状态行，以及按需展开的错误详情行。
+      function createFeishuMessageRows(message) {
+        const row = document.createElement("tr");
+        const messageKey = feishuMessageKey(message);
+        row.append(
+          feishuMessageCell(message.accountId || "-"),
+          feishuMessageCell(t("channels.messageSource." + (message.chatKind || "direct"))),
+          feishuMessageCell(message.senderName || "-"),
+          feishuMessageCell(message.preview || "-"),
+          feishuMessageCell(String(message.imageCount || 0)),
+          feishuStageCell(message.stage || "received"),
+          feishuMessageCell(formatDurationMs(message.elapsedMs)),
+          feishuErrorCell(message, messageKey)
+        );
+        if (!message.error) return [row];
+
+        const detailRow = createFeishuMessageDetailRow(message, messageKey);
+        return [row, detailRow];
+      }
+
+      // 生成普通消息单元格并设置 title，长文本靠浏览器悬停查看。
+      function feishuMessageCell(value) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        cell.title = value;
+        return cell;
+      }
+
+      // 生成可点击的错误单元格，避免完整错误只能靠悬停查看。
+      function feishuErrorCell(message, messageKey) {
+        if (!message.error) return feishuMessageCell("-");
+
+        const cell = document.createElement("td");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost channel-message-error-button";
+        button.textContent = compactErrorText(message.error);
+        button.title = message.error;
+        button.addEventListener("click", () => toggleFeishuMessageError(messageKey));
+        cell.appendChild(button);
+        return cell;
+      }
+
+      // 展开或收起指定消息的错误详情。
+      function toggleFeishuMessageError(messageKey) {
+        if (expandedFeishuMessageErrors.has(messageKey)) {
+          expandedFeishuMessageErrors.delete(messageKey);
+        } else {
+          expandedFeishuMessageErrors.add(messageKey);
+        }
+        if (channelsState) renderChannels(channelsState);
+      }
+
+      // 生成错误详情行，展示定位问题需要的完整上下文。
+      function createFeishuMessageDetailRow(message, messageKey) {
+        const row = document.createElement("tr");
+        row.className = "channel-message-detail-row";
+        row.hidden = !expandedFeishuMessageErrors.has(messageKey);
+        const cell = document.createElement("td");
+        cell.colSpan = 8;
+        const detail = document.createElement("div");
+        detail.className = "channel-message-detail";
+        const grid = document.createElement("div");
+        grid.className = "channel-message-detail-grid";
+        grid.append(
+          feishuDetailItem(t("channels.messageId"), message.messageId || "-"),
+          feishuDetailItem(t("channels.messageConversation"), message.conversationKey || "-"),
+          feishuDetailItem(t("channels.messageAccount"), message.accountId || "-"),
+          feishuDetailItem(t("channels.messageReceivedAt"), formatMessageTimestamp(message.receivedAt))
+        );
+        const error = document.createElement("pre");
+        error.className = "channel-message-error-text";
+        error.textContent = message.error || "-";
+        detail.append(grid, error);
+        cell.appendChild(detail);
+        row.appendChild(cell);
+        return row;
+      }
+
+      // 生成错误详情里的键值块。
+      function feishuDetailItem(label, value) {
+        const item = document.createElement("div");
+        item.className = "channel-message-detail-item";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const content = document.createElement("code");
+        content.textContent = value;
+        content.title = value;
+        item.append(name, content);
+        return item;
+      }
+
+      // 生成阶段标签单元格。
+      function feishuStageCell(stage) {
+        const cell = document.createElement("td");
+        const label = document.createElement("span");
+        label.className = "channel-message-stage " + String(stage).replace(/[^a-z0-9_-]/gi, "");
+        label.textContent = t("channels.messageStage." + stage);
+        cell.appendChild(label);
+        return cell;
+      }
+
+      // 用账号和 messageId 生成稳定 key，避免多账号消息互相影响展开状态。
+      function feishuMessageKey(message) {
+        return [message.accountId || "default", message.messageId || ""].join(":");
+      }
+
+      // 错误按钮只显示短文本，完整内容放在展开详情里。
+      function compactErrorText(error) {
+        const normalized = String(error || "").replace(/\s+/g, " ").trim();
+        return normalized.length > 42 ? normalized.slice(0, 39) + "..." : normalized || "-";
       }
 
       // 多飞书账号时，在同一个频道面板里按账号拆开展示。
       function resolveFeishuChannelTitle(channel) {
-        const accountId = channel.accountId || String(channel.id || "").replace(/^feishu:?/, "") || "";
+        const accountId = channel.accountId || resolveFeishuAccountId(channel);
         return accountId && accountId !== "default"
           ? t("channels.feishu") + " (" + accountId + ")"
           : t("channels.feishu");
+      }
+
+      // 从 channel id 里兜底拆出飞书账号名。
+      function resolveFeishuAccountId(channel) {
+        return String(channel.id || "").replace(/^feishu:?/, "") || "default";
       }
 
       // 生成频道面板标题。
@@ -3470,6 +3829,27 @@ function renderConfigPage(): string {
         content.title = value;
         row.append(name, content);
         return row;
+      }
+
+      // 把毫秒耗时压成短文本，避免状态表格跳动。
+      function formatDurationMs(value) {
+        const ms = Math.max(0, Number(value || 0));
+        if (ms < 1000) return Math.round(ms) + " ms";
+        if (ms < 60_000) return (ms / 1000).toFixed(1).replace(/\.0$/, "") + " s";
+        return (ms / 60_000).toFixed(1).replace(/\.0$/, "") + " min";
+      }
+
+      // 格式化飞书消息接收时间，非法时间保留为空占位。
+      function formatMessageTimestamp(value) {
+        const date = new Date(Number(value || 0));
+        if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return "-";
+        return date.toLocaleString(currentLanguage === "zh" ? "zh-CN" : "en-US", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
       }
 
       // Keep the API query as the single source of truth for dashboard filters.
@@ -4269,6 +4649,7 @@ function renderConfigPage(): string {
       });
       window.addEventListener("resize", fitTerminalSoon);
       window.addEventListener("beforeunload", () => {
+        if (channelsRefreshTimer) clearInterval(channelsRefreshTimer);
         // Close the local claudish process when the browser tab goes away.
         stopTerminalSession(false);
         terminalInputDisposable?.dispose();

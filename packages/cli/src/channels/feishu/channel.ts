@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import type { FeishuConfig } from "./config.js";
 import {
   type FeishuMessageEvent,
@@ -11,6 +12,7 @@ import {
 import type { FeishuHeadlessRunner } from "./headless-runner.js";
 import { FeishuHeadlessSessionRouter } from "./headless-session-router.js";
 import { type SavedFeishuImage, saveFeishuImage } from "./images.js";
+import { FeishuMessageProgressTracker } from "./message-tracker.js";
 import { FeishuOutputRelay } from "./output-relay.js";
 import { type FeishuMessageClient, sendFeishuText } from "./send.js";
 import { type FeishuRoutedSessionStatus, FeishuSessionRouter } from "./session-router.js";
@@ -73,6 +75,7 @@ export class FeishuChannel {
   private readonly outputRelays = new Map<string, FeishuOutputRelay>();
   private readonly handledMessageIds = new Map<string, number>();
   private readonly pendingEventTasks = new Set<Promise<void>>();
+  private readonly messageTracker: FeishuMessageProgressTracker;
   private status: string;
 
   constructor(options: FeishuChannelOptions) {
@@ -87,6 +90,10 @@ export class FeishuChannel {
     this.messageDedupeTtlMs = options.messageDedupeTtlMs ?? 10 * 60 * 1000;
     this.now = options.now ?? (() => Date.now());
     this.sessionRouter = options.sessionRouter ?? this.createDefaultSessionRouter(options);
+    this.messageTracker = new FeishuMessageProgressTracker({
+      accountId: options.config.id || "default",
+      now: this.now,
+    });
     this.logger = options.logger ?? console;
     this.status = options.config.enabled ? "configured" : "not_configured";
   }
@@ -97,6 +104,7 @@ export class FeishuChannel {
       return;
     }
 
+    mkdirSync(this.config.cwd, { recursive: true, mode: 0o700 });
     this.status = "connecting";
     await this.eventClient.start((payload) => this.handleEvent(payload));
     this.status = "connected";
@@ -121,6 +129,7 @@ export class FeishuChannel {
       ...(this.config.id && this.config.id !== "default" ? { accountId: this.config.id } : {}),
       model: this.config.model,
       cwd: this.config.cwd,
+      recentMessages: this.messageTracker.list(),
     };
   }
 
@@ -136,19 +145,38 @@ export class FeishuChannel {
   }
 
   private async processMessageEvent(event: FeishuMessageEvent): Promise<void> {
+    const botOpenId = this.config.botOpenId ?? "";
+    const text = stripBotMention(event.text, event.mentions, botOpenId);
+    const imageKeys = extractImageKeys(event);
+    if (!text && imageKeys.length === 0) return;
+
+    const conversationKey = resolveConversationKey(event);
+    const trackedMessage = this.messageTracker.start({
+      messageId: event.messageId,
+      conversationKey,
+      chatKind: event.chatKind,
+      senderName: event.senderName || event.senderOpenId,
+      preview: buildFeishuMessagePreview(text, imageKeys.length),
+      imageCount: imageKeys.length,
+    });
     const typingReaction = await this.addTypingReaction(event.messageId);
     try {
-      const botOpenId = this.config.botOpenId ?? "";
+      if (imageKeys.length > 0) {
+        this.messageTracker.update(trackedMessage.messageId, { stage: "downloading_images" });
+      }
       const imagePaths = await this.saveEventImages(event);
-      const text = stripBotMention(event.text, event.mentions, botOpenId);
-      if (!text && imagePaths.length === 0) return;
-
-      const conversationKey = resolveConversationKey(event);
+      if (!text && imageKeys.length > 0 && imagePaths.length === 0) {
+        this.messageTracker.update(trackedMessage.messageId, {
+          stage: "failed",
+          error: "图片下载失败",
+        });
+        return;
+      }
       this.replyTargets.set(conversationKey, event.messageId);
 
       const command = parseFeishuCommand(text);
       if (command) {
-        await this.handleCommand(conversationKey, command);
+        await this.handleCommand(conversationKey, command, trackedMessage.messageId);
         return;
       }
 
@@ -163,7 +191,16 @@ export class FeishuChannel {
         this.getOutputRelay(conversationKey).suppressEcho(claudishInput);
       }
 
+      this.messageTracker.update(trackedMessage.messageId, { stage: "queued" });
+      this.messageTracker.update(trackedMessage.messageId, { stage: "model_processing" });
       await this.sessionRouter.send(conversationKey, claudishInput);
+      this.messageTracker.update(trackedMessage.messageId, { stage: "completed" });
+    } catch (error) {
+      this.messageTracker.update(trackedMessage.messageId, {
+        stage: "failed",
+        error: formatError(error),
+      });
+      throw error;
     } finally {
       await this.removeTypingReaction(typingReaction);
     }
@@ -200,6 +237,7 @@ export class FeishuChannel {
 
   handleSessionOutput(conversationKey: string, data: string | Uint8Array): void {
     if (!this.messageClient) return;
+    this.messageTracker.updateActiveConversation(conversationKey, "replying");
     this.getOutputRelay(conversationKey).append(data);
   }
 
@@ -248,7 +286,12 @@ export class FeishuChannel {
     return relay;
   }
 
-  private async handleCommand(conversationKey: string, command: FeishuCommand): Promise<void> {
+  private async handleCommand(
+    conversationKey: string,
+    command: FeishuCommand,
+    messageId: string
+  ): Promise<void> {
+    this.messageTracker.update(messageId, { stage: "replying" });
     if (command === "new" || command === "clear") {
       if (this.sessionRouter.resetSession) {
         this.sessionRouter.resetSession(conversationKey);
@@ -257,12 +300,14 @@ export class FeishuChannel {
       }
       this.disposeRelay(conversationKey);
       await this.replyCommand(conversationKey, "已开启新会话。");
+      this.messageTracker.update(messageId, { stage: "completed" });
       return;
     }
 
     this.sessionRouter.stopSession?.(conversationKey);
     this.disposeRelay(conversationKey);
     await this.replyCommand(conversationKey, "已停止当前会话。");
+    this.messageTracker.update(messageId, { stage: "stopped" });
   }
 
   private async replyCommand(conversationKey: string, text: string): Promise<void> {
@@ -340,6 +385,14 @@ function parseFeishuCommand(text: string): FeishuCommand | null {
   if (command === "/clear") return "clear";
   if (command === "/stop") return "stop";
   return null;
+}
+
+function buildFeishuMessagePreview(text: string, imageCount: number): string {
+  const parts: string[] = [];
+  if (imageCount > 0) parts.push(`[图片 x${imageCount}]`);
+  if (text) parts.push(text);
+  const preview = parts.join(" ").trim();
+  return preview.length > 80 ? `${preview.slice(0, 77)}...` : preview;
 }
 
 function noopEventClient(): FeishuEventClient {

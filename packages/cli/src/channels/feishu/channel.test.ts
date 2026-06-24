@@ -69,6 +69,23 @@ describe("FeishuChannel", () => {
     expect(channel.getStatus()).toMatchObject({ id: "feishu", status: "not_configured" });
   });
 
+  test("start creates the configured working directory", async () => {
+    const accountCwd = join(cwd, "accounts", "wudonghao");
+    const channel = new FeishuChannel({
+      config: configuredConfig({ cwd: accountCwd }),
+      eventClient: {
+        async start() {},
+        async stop() {},
+      },
+    });
+
+    expect(existsSync(accountCwd)).toBe(false);
+
+    await channel.start();
+
+    expect(existsSync(accountCwd)).toBe(true);
+  });
+
   test("text event routes composed text to session router", async () => {
     const routed: string[] = [];
     const channel = new FeishuChannel({
@@ -138,6 +155,46 @@ describe("FeishuChannel", () => {
     await delay(5);
 
     expect(routed).toEqual(["[Alice] hello\n"]);
+  });
+
+  test("status exposes recent handled message progress", async () => {
+    let releaseSend!: () => void;
+    const sendFinished = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const channel = new FeishuChannel({
+      config: configuredConfig({ id: "donghao" }),
+      sessionRouter: {
+        async send() {
+          await sendFinished;
+        },
+        listSessions: () => [],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
+    await delay(5);
+
+    expect(channel.getStatus().recentMessages).toEqual([
+      expect.objectContaining({
+        accountId: "donghao",
+        messageId: "om_1",
+        conversationKey: "group:oc_group",
+        chatKind: "group",
+        senderName: "Alice",
+        preview: "hello",
+        imageCount: 0,
+        stage: "model_processing",
+      }),
+    ]);
+
+    releaseSend();
+    await delay(5);
+    expect(channel.getStatus().recentMessages?.[0]).toMatchObject({
+      messageId: "om_1",
+      stage: "completed",
+    });
   });
 
   test("headless mode replies with non-TUI output by default", async () => {
@@ -334,6 +391,7 @@ describe("FeishuChannel", () => {
     await channel.handleEvent(textPayload("hello", []));
 
     expect(routed).toEqual([]);
+    expect(channel.getStatus().recentMessages).toEqual([]);
   });
 
   test("image event downloads image, saves it, and routes path input", async () => {
