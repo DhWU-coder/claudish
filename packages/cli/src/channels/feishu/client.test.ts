@@ -35,6 +35,38 @@ describe("Feishu SDK client adapters", () => {
     expect(result.buffer.toString("utf-8")).toBe("png-data");
   });
 
+  test("createFeishuMediaClient downloads file resources", async () => {
+    const calls: unknown[] = [];
+    const mediaClient = createFeishuMediaClient({
+      im: {
+        v1: {
+          messageResource: {
+            async get(payload: unknown) {
+              calls.push(payload);
+              return {
+                headers: { "content-type": "application/pdf" },
+                getReadableStream() {
+                  return Readable.from([Buffer.from("pdf-data")]);
+                },
+              };
+            },
+          },
+        },
+      },
+    });
+
+    const result = await mediaClient.downloadFile("file_1", "om_1");
+
+    expect(calls).toEqual([
+      {
+        params: { type: "file" },
+        path: { message_id: "om_1", file_key: "file_1" },
+      },
+    ]);
+    expect(result.contentType).toBe("application/pdf");
+    expect(result.buffer.toString("utf-8")).toBe("pdf-data");
+  });
+
   test("createSdkFeishuReactionClient adds and removes typing reactions", async () => {
     const calls: unknown[] = [];
     const reactionClient = createSdkFeishuReactionClient({

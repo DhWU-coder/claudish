@@ -1564,16 +1564,19 @@ function renderConfigPage(): string {
       .channel-message-stage.stopped {
         color: var(--muted);
       }
-      .channel-message-error-button {
+      .channel-message-error-button,
+      .channel-session-detail-button {
         width: 100%;
         height: 26px;
         justify-content: flex-start;
         overflow: hidden;
         padding: 0 8px;
-        color: var(--danger);
         text-align: left;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .channel-message-error-button {
+        color: var(--danger);
       }
       .channel-message-detail-row td {
         padding: 0;
@@ -1600,18 +1603,22 @@ function renderConfigPage(): string {
         font-size: 11px;
       }
       .channel-message-detail-item code,
-      .channel-message-error-text {
+      .channel-message-error-text,
+      .channel-session-output-text {
         overflow-wrap: anywhere;
         white-space: pre-wrap;
       }
-      .channel-message-error-text {
+      .channel-message-error-text,
+      .channel-session-output-text {
         margin: 0;
         padding: 10px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: var(--field);
-        color: var(--danger);
         font: 12px/1.45 "SFMono-Regular", Consolas, monospace;
+      }
+      .channel-message-error-text {
+        color: var(--danger);
       }
       .usage-shell {
         display: grid;
@@ -2058,8 +2065,8 @@ function renderConfigPage(): string {
           </section>
           <section class="channel-messages">
             <div class="section-head">
-              <h2 data-i18n="channels.messages">Recent Feishu Messages</h2>
-              <div class="source" id="channel-feishu-message-count" data-i18n="channels.loading">Loading channel status.</div>
+              <h2 data-i18n="channels.sessionMonitor">Feishu Sessions</h2>
+              <div class="source" id="channel-feishu-session-count" data-i18n="channels.loading">Loading channel status.</div>
             </div>
             <div class="channel-message-table-wrap">
               <table class="channel-message-table">
@@ -2067,17 +2074,19 @@ function renderConfigPage(): string {
                   <tr>
                     <th data-i18n="channels.messageAccount">Account</th>
                     <th data-i18n="channels.messageSource">Source</th>
+                    <th data-i18n="channels.messageConversation">Conversation</th>
                     <th data-i18n="channels.messageSender">Sender</th>
                     <th data-i18n="channels.messagePreview">Message</th>
                     <th data-i18n="channels.messageImages">Images</th>
+                    <th data-i18n="channels.messageFiles">Files</th>
                     <th data-i18n="channels.messageStage">Stage</th>
                     <th data-i18n="channels.messageElapsed">Elapsed</th>
-                    <th data-i18n="channels.messageError">Error</th>
+                    <th data-i18n="channels.sessionDetails">Details</th>
                   </tr>
                 </thead>
-                <tbody id="channel-feishu-messages">
+                <tbody id="channel-feishu-sessions">
                   <tr>
-                    <td colspan="8" data-i18n="channels.loading">Loading channel status.</td>
+                    <td colspan="10" data-i18n="channels.loading">Loading channel status.</td>
                   </tr>
                 </tbody>
               </table>
@@ -2291,7 +2300,7 @@ function renderConfigPage(): string {
       let terminalInputDisposable = null;
       let terminalResizeDisposable = null;
       let channelsRefreshTimer = null;
-      let expandedFeishuMessageErrors = new Set();
+      let expandedFeishuSessionDetails = new Set();
       let currentLanguage = "en";
       let lastEditorState = null;
       const usageFilters = {
@@ -2393,6 +2402,15 @@ function renderConfigPage(): string {
           "channels.model": "Model",
           "channels.cwd": "Working directory",
           "channels.messages": "Recent Feishu Messages",
+          "channels.sessionMonitor": "Feishu Sessions",
+          "channels.sessionCount": "{count} sessions",
+          "channels.sessionEmpty": "No handled Feishu sessions yet.",
+          "channels.sessionDetails": "Details",
+          "channels.sessionDetailsButton": "Open",
+          "channels.sessionCurrentMessage": "Current message",
+          "channels.sessionMessageCount": "Messages",
+          "channels.sessionOutput": "Model output",
+          "channels.sessionMessageLog": "Message log",
           "channels.messageCount": "{count} messages",
           "channels.messageEmpty": "No handled Feishu messages yet.",
           "channels.messageAccount": "Account",
@@ -2400,6 +2418,7 @@ function renderConfigPage(): string {
           "channels.messageSender": "Sender",
           "channels.messagePreview": "Message",
           "channels.messageImages": "Images",
+          "channels.messageFiles": "Files",
           "channels.messageStage": "Stage",
           "channels.messageElapsed": "Elapsed",
           "channels.messageError": "Error",
@@ -2411,6 +2430,7 @@ function renderConfigPage(): string {
           "channels.messageSource.direct": "DM",
           "channels.messageStage.received": "Received",
           "channels.messageStage.downloading_images": "Downloading",
+          "channels.messageStage.downloading_files": "Downloading files",
           "channels.messageStage.queued": "Queued",
           "channels.messageStage.model_processing": "Model",
           "channels.messageStage.replying": "Replying",
@@ -2551,6 +2571,15 @@ function renderConfigPage(): string {
           "channels.model": "模型",
           "channels.cwd": "工作目录",
           "channels.messages": "最近飞书消息",
+          "channels.sessionMonitor": "飞书会话",
+          "channels.sessionCount": "{count} 个会话",
+          "channels.sessionEmpty": "还没有进入处理流程的飞书会话。",
+          "channels.sessionDetails": "详情",
+          "channels.sessionDetailsButton": "打开",
+          "channels.sessionCurrentMessage": "当前消息",
+          "channels.sessionMessageCount": "消息数",
+          "channels.sessionOutput": "模型输出",
+          "channels.sessionMessageLog": "消息记录",
           "channels.messageCount": "{count} 条消息",
           "channels.messageEmpty": "还没有进入处理流程的飞书消息。",
           "channels.messageAccount": "账号",
@@ -2558,6 +2587,7 @@ function renderConfigPage(): string {
           "channels.messageSender": "发送人",
           "channels.messagePreview": "消息",
           "channels.messageImages": "图片",
+          "channels.messageFiles": "文件",
           "channels.messageStage": "阶段",
           "channels.messageElapsed": "耗时",
           "channels.messageError": "错误",
@@ -2569,6 +2599,7 @@ function renderConfigPage(): string {
           "channels.messageSource.direct": "私聊",
           "channels.messageStage.received": "已接收",
           "channels.messageStage.downloading_images": "下载图片",
+          "channels.messageStage.downloading_files": "下载文件",
           "channels.messageStage.queued": "排队",
           "channels.messageStage.model_processing": "模型处理中",
           "channels.messageStage.replying": "回复中",
@@ -2673,8 +2704,8 @@ function renderConfigPage(): string {
       const channelsRefreshEl = document.querySelector("#channels-refresh");
       const channelsStatusEl = document.querySelector("#channels-status");
       const channelFeishuStatusEl = document.querySelector("#channel-feishu-status");
-      const channelFeishuMessagesEl = document.querySelector("#channel-feishu-messages");
-      const channelFeishuMessageCountEl = document.querySelector("#channel-feishu-message-count");
+      const channelFeishuSessionsEl = document.querySelector("#channel-feishu-sessions");
+      const channelFeishuSessionCountEl = document.querySelector("#channel-feishu-session-count");
       const usageRefreshEl = document.querySelector("#usage-refresh");
       const usagePresetButtonsEl = document.querySelector("#usage-preset-buttons");
       const usageRecentValueEl = document.querySelector("#usage-recent-value");
@@ -3649,59 +3680,102 @@ function renderConfigPage(): string {
             channelStatusRow(t("channels.cwd"), feishu.cwd || "-"),
           ])
         );
-        renderFeishuMessages(feishuChannels);
+        renderFeishuSessions(feishuChannels);
       }
 
-      // 渲染真正进入处理流程的飞书消息，不展示被忽略的群消息。
-      function renderFeishuMessages(feishuChannels) {
-        const messages = feishuChannels
-          .flatMap((channel) => {
-            const accountId = channel.accountId || resolveFeishuAccountId(channel);
-            return Array.isArray(channel.recentMessages)
-              ? channel.recentMessages.map((message) => ({
-                  ...message,
-                  accountId: message.accountId || accountId,
-                }))
-              : [];
-          })
-          .sort((left, right) => Number(right.receivedAt || 0) - Number(left.receivedAt || 0));
+      // 渲染真正进入处理流程的飞书会话，不展示被忽略的群消息。
+      function renderFeishuSessions(feishuChannels) {
+        const sessions = feishuChannels
+          .flatMap((channel) => collectFeishuSessions(channel))
+          .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
 
-        channelFeishuMessageCountEl.textContent = t("channels.messageCount", {
-          count: String(messages.length),
+        channelFeishuSessionCountEl.textContent = t("channels.sessionCount", {
+          count: String(sessions.length),
         });
-        channelFeishuMessagesEl.replaceChildren();
-        if (messages.length === 0) {
+        channelFeishuSessionsEl.replaceChildren();
+        if (sessions.length === 0) {
           const row = document.createElement("tr");
           const cell = document.createElement("td");
-          cell.colSpan = 8;
-          cell.textContent = t("channels.messageEmpty");
+          cell.colSpan = 10;
+          cell.textContent = t("channels.sessionEmpty");
           row.appendChild(cell);
-          channelFeishuMessagesEl.appendChild(row);
+          channelFeishuSessionsEl.appendChild(row);
           return;
         }
 
-        for (const message of messages) {
-          channelFeishuMessagesEl.append(...createFeishuMessageRows(message));
+        for (const session of sessions) {
+          channelFeishuSessionsEl.append(...createFeishuSessionRows(session));
         }
       }
 
-      // 生成单条飞书消息状态行，以及按需展开的错误详情行。
-      function createFeishuMessageRows(message) {
-        const row = document.createElement("tr");
-        const messageKey = feishuMessageKey(message);
-        row.append(
-          feishuMessageCell(message.accountId || "-"),
-          feishuMessageCell(t("channels.messageSource." + (message.chatKind || "direct"))),
-          feishuMessageCell(message.senderName || "-"),
-          feishuMessageCell(message.preview || "-"),
-          feishuMessageCell(String(message.imageCount || 0)),
-          feishuStageCell(message.stage || "received"),
-          feishuMessageCell(formatDurationMs(message.elapsedMs)),
-          feishuErrorCell(message, messageKey)
-        );
-        if (!message.error) return [row];
+      // 从新版会话状态读取数据，旧状态则按 conversationKey 兜底聚合。
+      function collectFeishuSessions(channel) {
+        const accountId = channel.accountId || resolveFeishuAccountId(channel);
+        if (Array.isArray(channel.recentSessions)) {
+          return channel.recentSessions.map((session) => ({
+            ...session,
+            accountId: session.accountId || accountId,
+          }));
+        }
 
-        const detailRow = createFeishuMessageDetailRow(message, messageKey);
+        const messages = Array.isArray(channel.recentMessages)
+          ? channel.recentMessages.map((message) => ({
+              ...message,
+              accountId: message.accountId || accountId,
+            }))
+          : [];
+        const sessions = new Map();
+        for (const message of messages) {
+          const key = message.conversationKey || message.messageId || "unknown";
+          const existing = sessions.get(key);
+          if (!existing) {
+            sessions.set(key, {
+              accountId: message.accountId || accountId,
+              conversationKey: key,
+              chatKind: message.chatKind || "direct",
+              senderName: message.senderName || "-",
+              preview: message.preview || "-",
+              imageCount: Number(message.imageCount || 0),
+              fileCount: Number(message.fileCount || 0),
+              messageCount: 1,
+              stage: message.stage || "received",
+              startedAt: message.receivedAt,
+              updatedAt: message.updatedAt || message.receivedAt,
+              elapsedMs: message.elapsedMs,
+              error: message.error,
+              output: message.output,
+              currentMessage: message,
+              messages: [message],
+            });
+            continue;
+          }
+          existing.messageCount += 1;
+          existing.messages.push(message);
+          existing.startedAt = Math.min(Number(existing.startedAt || 0), Number(message.receivedAt || 0));
+          existing.updatedAt = Math.max(Number(existing.updatedAt || 0), Number(message.updatedAt || message.receivedAt || 0));
+        }
+        return Array.from(sessions.values());
+      }
+
+      // 生成单条飞书会话状态行，以及按需展开的处理详情行。
+      function createFeishuSessionRows(session) {
+        const row = document.createElement("tr");
+        const currentMessage = session.currentMessage || {};
+        const sessionKey = feishuSessionKey(session);
+        row.append(
+          feishuMessageCell(session.accountId || "-"),
+          feishuMessageCell(t("channels.messageSource." + (session.chatKind || "direct"))),
+          feishuMessageCell(session.conversationKey || "-"),
+          feishuMessageCell(session.senderName || currentMessage.senderName || "-"),
+          feishuMessageCell(session.preview || currentMessage.preview || "-"),
+          feishuMessageCell(String(session.imageCount || currentMessage.imageCount || 0)),
+          feishuMessageCell(String(session.fileCount || currentMessage.fileCount || 0)),
+          feishuStageCell(session.stage || currentMessage.stage || "received"),
+          feishuMessageCell(formatDurationMs(session.elapsedMs ?? currentMessage.elapsedMs)),
+          feishuSessionDetailsCell(session, sessionKey)
+        );
+
+        const detailRow = createFeishuSessionDetailRow(session, sessionKey);
         return [row, detailRow];
       }
 
@@ -3713,55 +3787,108 @@ function renderConfigPage(): string {
         return cell;
       }
 
-      // 生成可点击的错误单元格，避免完整错误只能靠悬停查看。
-      function feishuErrorCell(message, messageKey) {
-        if (!message.error) return feishuMessageCell("-");
-
+      // 生成可点击的会话详情入口。
+      function feishuSessionDetailsCell(session, sessionKey) {
         const cell = document.createElement("td");
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "ghost channel-message-error-button";
-        button.textContent = compactErrorText(message.error);
-        button.title = message.error;
-        button.addEventListener("click", () => toggleFeishuMessageError(messageKey));
+        button.className = "ghost channel-session-detail-button";
+        button.textContent = session.error
+          ? compactErrorText(session.error)
+          : t("channels.sessionDetailsButton");
+        button.title = session.error || t("channels.sessionDetails");
+        button.addEventListener("click", () => toggleFeishuSessionDetails(sessionKey));
         cell.appendChild(button);
         return cell;
       }
 
-      // 展开或收起指定消息的错误详情。
-      function toggleFeishuMessageError(messageKey) {
-        if (expandedFeishuMessageErrors.has(messageKey)) {
-          expandedFeishuMessageErrors.delete(messageKey);
+      // 展开或收起指定飞书会话的处理详情。
+      function toggleFeishuSessionDetails(sessionKey) {
+        if (expandedFeishuSessionDetails.has(sessionKey)) {
+          expandedFeishuSessionDetails.delete(sessionKey);
         } else {
-          expandedFeishuMessageErrors.add(messageKey);
+          expandedFeishuSessionDetails.add(sessionKey);
         }
         if (channelsState) renderChannels(channelsState);
       }
 
-      // 生成错误详情行，展示定位问题需要的完整上下文。
-      function createFeishuMessageDetailRow(message, messageKey) {
+      // 生成会话详情行，展示当前消息进度、模型输出和完整错误。
+      function createFeishuSessionDetailRow(session, sessionKey) {
+        const currentMessage = session.currentMessage || {};
         const row = document.createElement("tr");
         row.className = "channel-message-detail-row";
-        row.hidden = !expandedFeishuMessageErrors.has(messageKey);
+        row.hidden = !expandedFeishuSessionDetails.has(sessionKey);
         const cell = document.createElement("td");
-        cell.colSpan = 8;
+        cell.colSpan = 10;
         const detail = document.createElement("div");
         detail.className = "channel-message-detail";
         const grid = document.createElement("div");
         grid.className = "channel-message-detail-grid";
         grid.append(
-          feishuDetailItem(t("channels.messageId"), message.messageId || "-"),
-          feishuDetailItem(t("channels.messageConversation"), message.conversationKey || "-"),
-          feishuDetailItem(t("channels.messageAccount"), message.accountId || "-"),
-          feishuDetailItem(t("channels.messageReceivedAt"), formatMessageTimestamp(message.receivedAt))
+          feishuDetailItem(t("channels.messageConversation"), session.conversationKey || "-"),
+          feishuDetailItem(t("channels.messageAccount"), session.accountId || "-"),
+          feishuDetailItem(t("channels.sessionCurrentMessage"), currentMessage.messageId || "-"),
+          feishuDetailItem(t("channels.sessionMessageCount"), String(session.messageCount || 0)),
+          feishuDetailItem(t("channels.messageReceivedAt"), formatMessageTimestamp(currentMessage.receivedAt || session.startedAt)),
+          feishuDetailItem(t("channels.messageStage"), t("channels.messageStage." + (session.stage || currentMessage.stage || "received")))
         );
-        const error = document.createElement("pre");
-        error.className = "channel-message-error-text";
-        error.textContent = message.error || "-";
-        detail.append(grid, error);
+        detail.append(
+          grid,
+          feishuDetailPre(
+            t("channels.sessionOutput"),
+            session.output || currentMessage.output || "-",
+            "channel-session-output-text"
+          ),
+          feishuDetailPre(
+            t("channels.sessionMessageLog"),
+            formatFeishuSessionMessageLog(session.messages || [currentMessage]),
+            "channel-session-output-text"
+          )
+        );
+        if (session.error || currentMessage.error) {
+          detail.append(
+            feishuDetailPre(
+              t("channels.messageError"),
+              session.error || currentMessage.error,
+              "channel-message-error-text"
+            )
+          );
+        }
         cell.appendChild(detail);
         row.appendChild(cell);
         return row;
+      }
+
+      // 生成详情里的长文本块。
+      function feishuDetailPre(label, value, className) {
+        const item = document.createElement("div");
+        item.className = "channel-message-detail-item";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const content = document.createElement("pre");
+        content.className = className;
+        content.textContent = value || "-";
+        item.append(name, content);
+        return item;
+      }
+
+      // 将 session 内的消息压成可读日志，便于定位当前卡在哪条消息。
+      function formatFeishuSessionMessageLog(messages) {
+        return messages
+          .filter(Boolean)
+          .map((message) => {
+            const lines = [
+              [
+                formatMessageTimestamp(message.receivedAt),
+                t("channels.messageStage." + (message.stage || "received")),
+                message.preview || "-",
+              ].join(" · "),
+            ];
+            if (message.output) lines.push(message.output);
+            if (message.error) lines.push(message.error);
+            return lines.join("\n");
+          })
+          .join("\n\n") || "-";
       }
 
       // 生成错误详情里的键值块。
@@ -3787,9 +3914,9 @@ function renderConfigPage(): string {
         return cell;
       }
 
-      // 用账号和 messageId 生成稳定 key，避免多账号消息互相影响展开状态。
-      function feishuMessageKey(message) {
-        return [message.accountId || "default", message.messageId || ""].join(":");
+      // 用账号和 conversationKey 生成稳定 key，避免多账号会话互相影响展开状态。
+      function feishuSessionKey(session) {
+        return [session.accountId || "default", session.conversationKey || ""].join(":");
       }
 
       // 错误按钮只显示短文本，完整内容放在展开详情里。

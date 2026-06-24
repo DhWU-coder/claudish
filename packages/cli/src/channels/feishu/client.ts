@@ -90,6 +90,16 @@ export function createFeishuMediaClient(client: FeishuSdkMediaClientLike): Feish
         contentType: response.headers?.["content-type"] ?? "image/png",
       };
     },
+    async downloadFile(fileKey, messageId) {
+      const response = await client.im.v1.messageResource.get({
+        params: { type: "file" },
+        path: { message_id: messageId, file_key: fileKey },
+      });
+      return {
+        buffer: await readableToBuffer(response.getReadableStream()),
+        contentType: response.headers?.["content-type"] ?? "application/octet-stream",
+      };
+    },
   };
 }
 

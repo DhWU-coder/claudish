@@ -20,6 +20,11 @@ export interface FeishuMessageEvent {
   raw: unknown;
 }
 
+export interface FeishuFileResource {
+  fileKey: string;
+  fileName?: string;
+}
+
 export function parseFeishuMessageEvent(payload: unknown): FeishuMessageEvent | null {
   const event = recordField(payload, "event");
   const message = recordField(event, "message");
@@ -58,12 +63,30 @@ export function extractImageKeys(event: FeishuMessageEvent | null | undefined): 
   const keys = [
     event.content.image_key,
     event.content.imageKey,
-    event.content.file_key,
     ...extractPostImageKeys(event.content),
   ]
     .map(stringField)
     .filter(Boolean);
   return Array.from(new Set(keys));
+}
+
+export function extractFileResources(
+  event: FeishuMessageEvent | null | undefined
+): FeishuFileResource[] {
+  if (!event) return [];
+
+  const resources: FeishuFileResource[] = [];
+  if (event.messageType === "file") {
+    resources.push(fileResourceFromRecord(event.content));
+  }
+  resources.push(...extractPostFileResources(event.content));
+
+  const unique = new Map<string, FeishuFileResource>();
+  for (const resource of resources) {
+    if (!resource.fileKey) continue;
+    unique.set(resource.fileKey, resource);
+  }
+  return Array.from(unique.values());
 }
 
 export function stripBotMention(
@@ -94,12 +117,15 @@ export function buildClaudeCodeInputForFeishu(input: {
   senderName: string;
   text: string;
   imagePaths: string[];
+  filePaths?: string[];
 }): string {
+  const filePaths = input.filePaths ?? [];
   const trimmedText = input.text.trim();
-  const text = trimmedText || (input.imagePaths.length > 0 ? "请分析这张图片。" : "");
+  const text =
+    trimmedText || (input.imagePaths.length > 0 && filePaths.length === 0 ? "请分析这张图片。" : "");
   const prefixedText =
     input.chatKind === "group" && text ? `[${input.senderName || input.chatId}] ${text}` : text;
-  const lines = [prefixedText, ...input.imagePaths].filter(Boolean);
+  const lines = [prefixedText, ...input.imagePaths, ...filePaths].filter(Boolean);
   return `${lines.join("\n")}\n`;
 }
 
@@ -179,6 +205,22 @@ function extractPostImageKeys(content: Record<string, unknown>): string[] {
     .filter((element) => stringField(element.tag).toLowerCase() === "img")
     .map((element) => stringField(element.image_key) || stringField(element.imageKey))
     .filter(Boolean);
+}
+
+function extractPostFileResources(content: Record<string, unknown>): FeishuFileResource[] {
+  return postRowsFromContent(content)
+    .flat()
+    .filter(isRecord)
+    .filter((element) => stringField(element.tag).toLowerCase() === "file")
+    .map(fileResourceFromRecord)
+    .filter((resource) => Boolean(resource.fileKey));
+}
+
+function fileResourceFromRecord(record: Record<string, unknown>): FeishuFileResource {
+  const fileKey = stringField(record.file_key) || stringField(record.fileKey);
+  const fileName =
+    stringField(record.file_name) || stringField(record.fileName) || stringField(record.name);
+  return fileName ? { fileKey, fileName } : { fileKey };
 }
 
 function postRowsFromContent(content: Record<string, unknown>): unknown[][] {

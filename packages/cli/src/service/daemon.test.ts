@@ -95,6 +95,7 @@ describe("service daemon", () => {
           model: "cx@gpt-5.5",
           cwd: "/tmp/project",
           recentMessages: [],
+          recentSessions: [],
         },
       ],
     });

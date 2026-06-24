@@ -54,6 +54,37 @@ describe("FeishuHeadlessSessionRouter", () => {
     expect(lines.map((line) => line.role)).toEqual(["user", "assistant", "user", "assistant"]);
   });
 
+  test("forwards progress events separately from final replies", async () => {
+    const outputs: string[] = [];
+    const progress: string[] = [];
+    const router = new FeishuHeadlessSessionRouter({
+      model: "cx@gpt-5.5",
+      cwd: "/tmp/project",
+      historyBaseDir: dir,
+      history: {
+        persist: true,
+        maxMessages: 50,
+        nativeResume: true,
+      },
+      createSessionId: () => "11111111-1111-4111-8111-111111111111",
+      runHeadless: async (input) => {
+        input.onProgress?.({ type: "tool_start", name: "Read", input: { file_path: "src/a.ts" } });
+        return { text: "最终回复" };
+      },
+      onProgress: (_conversationKey, event) => {
+        progress.push(`${event.type}:${"name" in event ? event.name : ""}`);
+      },
+      onOutput: (_conversationKey, data) => {
+        outputs.push(typeof data === "string" ? data : Buffer.from(data).toString("utf-8"));
+      },
+    });
+
+    await router.send("group:oc_1", "[Alice] hello");
+
+    expect(progress).toEqual(["tool_start:Read"]);
+    expect(outputs).toEqual(["最终回复"]);
+  });
+
   test("falls back to jsonl history when native resume fails", async () => {
     const calls: FeishuHeadlessRunInput[] = [];
     const router = new FeishuHeadlessSessionRouter({

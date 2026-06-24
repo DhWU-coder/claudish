@@ -3,17 +3,19 @@ import type { FeishuConfig } from "./config.js";
 import {
   type FeishuMessageEvent,
   buildClaudeCodeInputForFeishu,
+  extractFileResources,
   extractImageKeys,
   parseFeishuMessageEvent,
   resolveConversationKey,
   shouldHandleMessage,
   stripBotMention,
 } from "./events.js";
-import type { FeishuHeadlessRunner } from "./headless-runner.js";
+import { saveFeishuFile } from "./files.js";
+import type { FeishuHeadlessProgressEvent, FeishuHeadlessRunner } from "./headless-runner.js";
 import { FeishuHeadlessSessionRouter } from "./headless-session-router.js";
 import { type SavedFeishuImage, saveFeishuImage } from "./images.js";
 import { FeishuMessageProgressTracker } from "./message-tracker.js";
-import { FeishuOutputRelay } from "./output-relay.js";
+import { FeishuOutputRelay, cleanTerminalOutput } from "./output-relay.js";
 import { type FeishuMessageClient, sendFeishuText } from "./send.js";
 import { type FeishuRoutedSessionStatus, FeishuSessionRouter } from "./session-router.js";
 
@@ -25,6 +27,10 @@ export interface FeishuEventClient {
 export interface FeishuMediaClient {
   downloadImage(
     imageKey: string,
+    messageId: string
+  ): Promise<{ buffer: Buffer | Uint8Array; contentType: string }>;
+  downloadFile?(
+    fileKey: string,
     messageId: string
   ): Promise<{ buffer: Buffer | Uint8Array; contentType: string }>;
 }
@@ -130,6 +136,7 @@ export class FeishuChannel {
       model: this.config.model,
       cwd: this.config.cwd,
       recentMessages: this.messageTracker.list(),
+      recentSessions: this.messageTracker.listSessions(),
     };
   }
 
@@ -148,7 +155,8 @@ export class FeishuChannel {
     const botOpenId = this.config.botOpenId ?? "";
     const text = stripBotMention(event.text, event.mentions, botOpenId);
     const imageKeys = extractImageKeys(event);
-    if (!text && imageKeys.length === 0) return;
+    const fileResources = extractFileResources(event);
+    if (!text && imageKeys.length === 0 && fileResources.length === 0) return;
 
     const conversationKey = resolveConversationKey(event);
     const trackedMessage = this.messageTracker.start({
@@ -156,8 +164,9 @@ export class FeishuChannel {
       conversationKey,
       chatKind: event.chatKind,
       senderName: event.senderName || event.senderOpenId,
-      preview: buildFeishuMessagePreview(text, imageKeys.length),
+      preview: buildFeishuMessagePreview(text, imageKeys.length, fileResources.length),
       imageCount: imageKeys.length,
+      fileCount: fileResources.length,
     });
     const typingReaction = await this.addTypingReaction(event.messageId);
     try {
@@ -169,6 +178,17 @@ export class FeishuChannel {
         this.messageTracker.update(trackedMessage.messageId, {
           stage: "failed",
           error: "图片下载失败",
+        });
+        return;
+      }
+      if (fileResources.length > 0) {
+        this.messageTracker.update(trackedMessage.messageId, { stage: "downloading_files" });
+      }
+      const filePaths = await this.saveEventFiles(event);
+      if (!text && imageKeys.length === 0 && fileResources.length > 0 && filePaths.length === 0) {
+        this.messageTracker.update(trackedMessage.messageId, {
+          stage: "failed",
+          error: "文件下载失败",
         });
         return;
       }
@@ -186,6 +206,7 @@ export class FeishuChannel {
         senderName: event.senderName || event.senderOpenId,
         text,
         imagePaths,
+        filePaths,
       });
       if (this.messageClient) {
         this.getOutputRelay(conversationKey).suppressEcho(claudishInput);
@@ -236,9 +257,25 @@ export class FeishuChannel {
   }
 
   handleSessionOutput(conversationKey: string, data: string | Uint8Array): void {
-    if (!this.messageClient) return;
     this.messageTracker.updateActiveConversation(conversationKey, "replying");
-    this.getOutputRelay(conversationKey).append(data);
+    if (!this.messageClient) {
+      const text = typeof data === "string" ? data : Buffer.from(data).toString("utf-8");
+      this.messageTracker.appendOutput(conversationKey, cleanTerminalOutput(text));
+      return;
+    }
+
+    const relay = this.getOutputRelay(conversationKey);
+    const text = relay.append(data);
+    if (text) {
+      this.messageTracker.appendOutput(conversationKey, formatFeishuProgressEvent({
+        type: "assistant_text",
+        text,
+      }));
+    }
+  }
+
+  handleSessionProgress(conversationKey: string, event: FeishuHeadlessProgressEvent): void {
+    this.messageTracker.appendOutput(conversationKey, formatFeishuProgressEvent(event));
   }
 
   private async saveEventImages(
@@ -265,6 +302,31 @@ export class FeishuChannel {
       }
     }
     return imagePaths;
+  }
+
+  private async saveEventFiles(
+    event: ReturnType<typeof parseFeishuMessageEvent>
+  ): Promise<string[]> {
+    if (!event || !this.mediaClient?.downloadFile) return [];
+
+    const filePaths: string[] = [];
+    for (const resource of extractFileResources(event)) {
+      try {
+        const file = await this.mediaClient.downloadFile(resource.fileKey, event.messageId);
+        const savedFile = saveFeishuFile({
+          cwd: this.config.cwd,
+          messageId: event.messageId,
+          fileKey: resource.fileKey,
+          fileName: resource.fileName,
+          buffer: file.buffer,
+          contentType: file.contentType,
+        });
+        filePaths.push(savedFile.path);
+      } catch (error) {
+        this.logger.warn(error instanceof Error ? error.message : String(error));
+      }
+    }
+    return filePaths;
   }
 
   private getOutputRelay(conversationKey: string): FeishuOutputRelay {
@@ -369,6 +431,7 @@ export class FeishuChannel {
       historyBaseDir: options.historyBaseDir,
       runHeadless: options.headlessRunner,
       onOutput,
+      onProgress: (conversationKey, event) => this.handleSessionProgress(conversationKey, event),
     });
   }
 }
@@ -387,9 +450,10 @@ function parseFeishuCommand(text: string): FeishuCommand | null {
   return null;
 }
 
-function buildFeishuMessagePreview(text: string, imageCount: number): string {
+function buildFeishuMessagePreview(text: string, imageCount: number, fileCount = 0): string {
   const parts: string[] = [];
   if (imageCount > 0) parts.push(`[图片 x${imageCount}]`);
+  if (fileCount > 0) parts.push(`[文件 x${fileCount}]`);
   if (text) parts.push(text);
   const preview = parts.join(" ").trim();
   return preview.length > 80 ? `${preview.slice(0, 77)}...` : preview;
@@ -404,4 +468,29 @@ function noopEventClient(): FeishuEventClient {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatFeishuProgressEvent(event: FeishuHeadlessProgressEvent): string {
+  if (event.type === "assistant_text") {
+    return `[assistant] ${event.text}\n`;
+  }
+  if (event.type === "tool_start") {
+    const input = formatProgressPayload(event.input);
+    return input ? `[tool] ${event.name} ${input}\n` : `[tool] ${event.name}\n`;
+  }
+  if (event.type === "tool_result") {
+    const prefix = event.isError ? "[tool:error]" : "[tool:result]";
+    return `${prefix} ${event.text}\n`;
+  }
+  return `[stderr] ${event.text}\n`;
+}
+
+function formatProgressPayload(input: unknown): string {
+  if (input === undefined || input === null) return "";
+  try {
+    const text = JSON.stringify(input);
+    return text.length > 1000 ? `${text.slice(0, 997)}...` : text;
+  } catch {
+    return String(input);
+  }
 }

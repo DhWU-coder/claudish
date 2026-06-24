@@ -1,6 +1,7 @@
 export type FeishuMessageProgressStage =
   | "received"
   | "downloading_images"
+  | "downloading_files"
   | "queued"
   | "model_processing"
   | "replying"
@@ -16,11 +17,32 @@ export interface FeishuTrackedMessage {
   senderName: string;
   preview: string;
   imageCount: number;
+  fileCount: number;
   stage: FeishuMessageProgressStage;
   receivedAt: number;
   updatedAt: number;
   elapsedMs: number;
   error?: string;
+  output?: string;
+}
+
+export interface FeishuTrackedSession {
+  accountId: string;
+  conversationKey: string;
+  chatKind: "group" | "direct";
+  senderName: string;
+  preview: string;
+  imageCount: number;
+  fileCount: number;
+  messageCount: number;
+  stage: FeishuMessageProgressStage;
+  startedAt: number;
+  updatedAt: number;
+  elapsedMs: number;
+  error?: string;
+  output?: string;
+  currentMessage: FeishuTrackedMessage;
+  messages: FeishuTrackedMessage[];
 }
 
 export interface FeishuMessageProgressTrackerOptions {
@@ -36,6 +58,7 @@ export interface StartFeishuMessageProgressInput {
   senderName: string;
   preview: string;
   imageCount: number;
+  fileCount?: number;
 }
 
 export class FeishuMessageProgressTracker {
@@ -62,6 +85,7 @@ export class FeishuMessageProgressTracker {
       senderName: input.senderName || "-",
       preview: input.preview,
       imageCount: input.imageCount,
+      fileCount: input.fileCount ?? 0,
       stage: "received",
       receivedAt: timestamp,
       updatedAt: timestamp,
@@ -97,6 +121,30 @@ export class FeishuMessageProgressTracker {
     this.update(messageId, { stage });
   }
 
+  appendOutput(conversationKey: string, output: string): void {
+    const messageId = this.activeByConversation.get(conversationKey);
+    if (!messageId) return;
+    const message = this.messages.get(messageId);
+    if (!message || !output) return;
+
+    const timestamp = this.now();
+    message.output = trimOutput(`${message.output ?? ""}${output}`);
+    message.updatedAt = timestamp;
+    message.elapsedMs = Math.max(0, timestamp - message.receivedAt);
+  }
+
+  setOutput(conversationKey: string, output: string): void {
+    const messageId = this.activeByConversation.get(conversationKey);
+    if (!messageId) return;
+    const message = this.messages.get(messageId);
+    if (!message) return;
+
+    const timestamp = this.now();
+    message.output = trimOutput(output);
+    message.updatedAt = timestamp;
+    message.elapsedMs = Math.max(0, timestamp - message.receivedAt);
+  }
+
   list(): FeishuTrackedMessage[] {
     const timestamp = this.now();
     return this.messageOrder
@@ -108,6 +156,42 @@ export class FeishuMessageProgressTracker {
           ? message.elapsedMs
           : Math.max(0, timestamp - message.receivedAt),
       }));
+  }
+
+  listSessions(): FeishuTrackedSession[] {
+    const sessions = new Map<string, FeishuTrackedSession>();
+
+    for (const message of this.list()) {
+      const existing = sessions.get(message.conversationKey);
+      if (!existing) {
+        sessions.set(message.conversationKey, {
+          accountId: message.accountId,
+          conversationKey: message.conversationKey,
+          chatKind: message.chatKind,
+          senderName: message.senderName,
+          preview: message.preview,
+          imageCount: message.imageCount,
+          fileCount: message.fileCount,
+          messageCount: 1,
+          stage: message.stage,
+          startedAt: message.receivedAt,
+          updatedAt: message.updatedAt,
+          elapsedMs: message.elapsedMs,
+          error: message.error,
+          output: message.output,
+          currentMessage: message,
+          messages: [message],
+        });
+        continue;
+      }
+
+      existing.messageCount += 1;
+      existing.startedAt = Math.min(existing.startedAt, message.receivedAt);
+      existing.updatedAt = Math.max(existing.updatedAt, message.updatedAt);
+      existing.messages.push(message);
+    }
+
+    return Array.from(sessions.values());
   }
 
   private prune(): void {
@@ -129,4 +213,8 @@ export class FeishuMessageProgressTracker {
 
 function isFinalStage(stage: FeishuMessageProgressStage): boolean {
   return stage === "completed" || stage === "failed" || stage === "stopped";
+}
+
+function trimOutput(output: string): string {
+  return output.length > 12000 ? output.slice(-12000) : output;
 }

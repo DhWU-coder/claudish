@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FeishuChannel, type FeishuEventClient } from "./channel.js";
@@ -185,6 +185,7 @@ describe("FeishuChannel", () => {
         senderName: "Alice",
         preview: "hello",
         imageCount: 0,
+        fileCount: 0,
         stage: "model_processing",
       }),
     ]);
@@ -194,6 +195,15 @@ describe("FeishuChannel", () => {
     expect(channel.getStatus().recentMessages?.[0]).toMatchObject({
       messageId: "om_1",
       stage: "completed",
+    });
+    expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
+      accountId: "donghao",
+      conversationKey: "group:oc_group",
+      messageCount: 1,
+      currentMessage: expect.objectContaining({
+        messageId: "om_1",
+        stage: "completed",
+      }),
     });
   });
 
@@ -234,6 +244,53 @@ describe("FeishuChannel", () => {
       nativeResume: true,
     });
     expect(replies).toEqual(["om_1:纯文本回答"]);
+  });
+
+  test("headless progress appears in monitor without being sent as Feishu replies", async () => {
+    const replies: string[] = [];
+    let finishRun!: () => void;
+    const runMayFinish = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async (input) => {
+        input.onProgress?.({ type: "assistant_text", text: "我先看项目结构。" });
+        input.onProgress?.({ type: "tool_start", name: "Read", input: { file_path: "src/a.ts" } });
+        await runMayFinish;
+        return { text: "最终回答" };
+      },
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(`${input.messageId}:${input.text}`);
+        },
+        async sendText() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
+    await delay(10);
+
+    expect(replies).toEqual([]);
+    expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
+      conversationKey: "group:oc_group",
+      output: expect.stringContaining("Read"),
+    });
+    expect(channel.getStatus().recentSessions?.[0].output).toContain("我先看项目结构。");
+    expect(channel.getStatus().recentSessions?.[0].output).toContain("src/a.ts");
+
+    finishRun();
+    await delay(30);
+    expect(replies).toEqual(["om_1:最终回答"]);
   });
 
   test("adds and removes typing reaction while processing a message", async () => {
@@ -436,6 +493,95 @@ describe("FeishuChannel", () => {
     );
     expect(existsSync(imagePath)).toBe(true);
     expect(routed).toEqual([`[Alice] 请分析这张图片。\n${imagePath}\n`]);
+  });
+
+  test("file event downloads file under cwd and routes file-only path input", async () => {
+    const routed: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      mediaClient: {
+        async downloadImage() {
+          throw new Error("should not download image");
+        },
+        async downloadFile(fileKey, messageId) {
+          expect(fileKey).toBe("file_1");
+          expect(messageId).toBe("om_file");
+          return { buffer: Buffer.from("pdf-data"), contentType: "application/pdf" };
+        },
+      },
+      sessionRouter: {
+        async send(_conversationKey, text) {
+          routed.push(text);
+        },
+        listSessions: () => [],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent({
+      event: {
+        sender: { sender_id: { open_id: "ou_sender" }, sender_name: "Alice" },
+        message: {
+          message_id: "om_file",
+          chat_id: "oc_group",
+          chat_type: "group",
+          message_type: "file",
+          content: JSON.stringify({ file_key: "file_1", file_name: "报告.pdf" }),
+          mentions: [{ id: { open_id: "ou_bot" }, name: "bot" }],
+        },
+      },
+    });
+    await delay(20);
+
+    const filePath = join(cwd, "feishu-files", "om_file-file_1-报告.pdf");
+    expect(existsSync(filePath)).toBe(true);
+    expect(readFileSync(filePath, "utf-8")).toBe("pdf-data");
+    expect(routed).toEqual([`${filePath}\n`]);
+    expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
+      conversationKey: "group:oc_group",
+      fileCount: 1,
+      currentMessage: expect.objectContaining({
+        preview: "[文件 x1]",
+        fileCount: 1,
+        stage: "completed",
+      }),
+    });
+  });
+
+  test("session status keeps model output for channel monitor details", async () => {
+    let releaseSend!: () => void;
+    const sendFinished = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const channel = new FeishuChannel({
+      config: configuredConfig({ id: "donghao" }),
+      sessionRouter: {
+        async send() {
+          channel.handleSessionOutput("group:oc_group", "第一段输出");
+          await sendFinished;
+        },
+        listSessions: () => [],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
+    await delay(5);
+
+    expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
+      accountId: "donghao",
+      conversationKey: "group:oc_group",
+      stage: "replying",
+      output: "第一段输出",
+      messages: [
+        expect.objectContaining({
+          messageId: "om_1",
+          output: "第一段输出",
+        }),
+      ],
+    });
+
+    releaseSend();
   });
 
   test("image event can route an explicitly enhanced image path", async () => {

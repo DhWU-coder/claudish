@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FeishuHistoryConfig } from "./config.js";
 import {
+  type FeishuHeadlessProgressEvent,
   type FeishuHeadlessRunInput,
   type FeishuHeadlessRunner,
   runFeishuHeadless,
@@ -20,6 +21,7 @@ export interface FeishuHeadlessSessionRouterOptions {
   createSessionId?: () => string;
   runHeadless?: FeishuHeadlessRunner;
   onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
+  onProgress?: (conversationKey: string, event: FeishuHeadlessProgressEvent) => void;
 }
 
 interface RoutedHeadlessSession {
@@ -37,6 +39,10 @@ export class FeishuHeadlessSessionRouter {
   private readonly createSessionId: () => string;
   private readonly runHeadless: FeishuHeadlessRunner;
   private readonly onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
+  private readonly onProgress?: (
+    conversationKey: string,
+    event: FeishuHeadlessProgressEvent
+  ) => void;
   private readonly sessions = new Map<string, RoutedHeadlessSession>();
 
   constructor(options: FeishuHeadlessSessionRouterOptions) {
@@ -50,6 +56,7 @@ export class FeishuHeadlessSessionRouter {
     this.createSessionId = options.createSessionId ?? randomUUID;
     this.runHeadless = options.runHeadless ?? runFeishuHeadless;
     this.onOutput = options.onOutput;
+    this.onProgress = options.onProgress;
   }
 
   async send(conversationKey: string, text: string): Promise<void> {
@@ -205,6 +212,7 @@ export class FeishuHeadlessSessionRouter {
       resume,
       nativeResume: this.history.nativeResume,
       signal,
+      onProgress: (event) => this.onProgress?.(metadata.conversationKey, event),
     };
   }
 

@@ -31,16 +31,17 @@ export class FeishuOutputRelay {
     }
   }
 
-  append(data: string | Uint8Array): void {
+  append(data: string | Uint8Array): string {
     const text = cleanTerminalOutput(
       typeof data === "string" ? data : Buffer.from(data).toString("utf-8"),
       this.suppressedEchoes
     );
-    if (!text) return;
+    if (!text) return "";
 
     this.pending += text;
     this.scrollback += text;
     this.scheduleFlush();
+    return text;
   }
 
   getScrollback(): string {
