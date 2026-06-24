@@ -1,25 +1,88 @@
 # Claudish 后台服务与 Channels 示例配置
 # 实际使用时放到 ~/.claudish/config.yaml
+# 注意：当前 config.yaml 不支持自动热更新；改完后需要运行 claudish restart 才会重新加载。
 
 service:
   # Web 监控界面的优先端口；如果被占用，claudish start 会提示 warning 并自动换到下一个可用端口。
   port: 17888
-  # 后台服务默认工作目录；不写时也会默认使用 ~/.claudish/workspace。
+  # 后台服务默认工作目录；不写时默认使用 ~/.claudish/workspace。
+  # Web 端 terminal 默认也会在这个目录里启动。
   cwd: ~/.claudish/workspace
 
 channels:
   feishu:
-    # true 表示启动时连接飞书 WebSocket；改成 false 可以临时关闭飞书通道。
-    enabled: true
-    # 飞书开放平台应用的 App ID，一般形如 cli_xxx。
-    appId: cli_xxx
-    # 飞书开放平台应用的 App Secret；建议只放在本机 ~/.claudish/config.yaml，不要提交真实密钥。
-    appSecret: your_app_secret
-    # 机器人 open_id，用来判断群聊里是不是 @ 了机器人；私聊不依赖这个字段。
-    botOpenId: ou_xxx
-    # 国内飞书用 feishu，国际版 Lark 用 lark。
-    domain: feishu
-    # 飞书消息进入 claudish CLI PTY 时使用的模型；不写时使用 CLAUDISH_MODEL 或 cx@gpt-5.5。
-    model: cx@gpt-5.5
-    # 飞书会话的工作目录；不写时继承 service.cwd，图片也会缓存到这个目录下。
-    cwd: ~/.claudish/workspace
+    # 多账号写法：accounts 里的每一项都是一个独立飞书机器人。
+    # 每个账号会启动一条独立的飞书 WebSocket 长连接，互不影响。
+    accounts:
+      # 账号标识，用来区分多个飞书机器人；会显示在 Web UI channel 状态里。
+      # 只能用字母、数字、点、下划线和短横线；建议写成自己能看懂的短名字。
+      - id: donghao
+        # 是否启用这个飞书账号；不写时，只要 appId/appSecret 存在就默认启用。
+        # 临时关闭某个飞书机器人时可以改成 false。
+        enabled: true
+        # 飞书开放平台应用的 App ID，一般形如 cli_xxx。
+        appId: cli_xxx
+        # 飞书开放平台应用的 App Secret；只放在本机 ~/.claudish/config.yaml，不要提交真实密钥。
+        appSecret: your_app_secret
+        # 机器人 open_id，用来判断群聊里是不是 @ 了这个机器人；私聊不依赖这个字段。
+        botOpenId: ou_xxx
+        # 国内飞书写 feishu；国际版 Lark 写 lark。
+        domain: feishu
+        # 这个飞书账号调用 claudish 时使用的模型；不写时使用 CLAUDISH_MODEL，仍没有则用 cx@gpt-5.5。
+        model: cx@gpt-5.5
+        # 这个飞书账号的工作目录；图片缓存、Claude Code 读写文件都在这里。
+        # 不写时默认使用 ~/.claudish/workspace/{id}，例如 ~/.claudish/workspace/donghao。
+        cwd: ~/.claudish/workspace/donghao
+        # headless：飞书专用非 TUI 模式，只把正式正文回复到飞书，推荐使用。
+        # terminal：旧的 PTY/TUI 模式，会模拟终端会话，主要用于兼容或排查问题。
+        sessionMode: headless
+        history:
+          # true 表示保存每个群/私聊的 session.json 和 messages.jsonl，后台重启后仍可恢复历史。
+          persist: true
+          # Claude Code 原生 resume 失败时，最多把最近多少条 JSONL 历史拼回 prompt 兜底。
+          maxMessages: 50
+          # true 表示优先使用 Claude Code 的 --session-id/--resume 保留原生会话上下文。
+          # 如果你希望每次都只靠 JSONL 兜底历史，可以改成 false。
+          nativeResume: true
+
+      # 第二个飞书机器人示例。
+      - id: team
+        # 是否启用这个账号；false 时这个账号不会连接飞书 WebSocket。
+        enabled: true
+        # 第二个飞书开放平台应用的 App ID。
+        appId: cli_yyy
+        # 第二个飞书开放平台应用的 App Secret。
+        appSecret: another_app_secret
+        # 第二个机器人的 open_id。
+        botOpenId: ou_yyy
+        # 这里同样可以写 feishu 或 lark；不写默认 feishu。
+        domain: feishu
+        # 可以给不同飞书账号指定不同模型；不写则走默认模型。
+        model: cx@gpt-5.5
+        # 这里演示不写 cwd 的效果：实际默认是 ~/.claudish/workspace/team。
+        # cwd: ~/.claudish/workspace/team
+        # 推荐保持 headless；只有需要旧终端模式时再改 terminal。
+        sessionMode: headless
+        history:
+          # 是否持久化这个账号下每个会话的历史。
+          persist: true
+          # JSONL 历史兜底最多读取多少条消息。
+          maxMessages: 50
+          # 是否优先使用 Claude Code 原生 resume。
+          nativeResume: true
+
+    # 兼容写法：如果你只接一个飞书机器人，也可以不用 accounts，直接写下面这些字段。
+    # 注意：不要同时启用 accounts 和单账号字段；写了 accounts 时会优先按 accounts 启动。
+    #
+    # enabled: true
+    # appId: cli_xxx
+    # appSecret: your_app_secret
+    # botOpenId: ou_xxx
+    # domain: feishu
+    # model: cx@gpt-5.5
+    # cwd: ~/.claudish/workspace
+    # sessionMode: headless
+    # history:
+    #   persist: true
+    #   maxMessages: 50
+    #   nativeResume: true

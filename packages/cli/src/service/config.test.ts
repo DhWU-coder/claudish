@@ -71,6 +71,11 @@ describe("claudish config.yaml", () => {
         "    domain: lark",
         "    model: cx@gpt-5.5",
         "    cwd: /tmp/feishu-project",
+        "    sessionMode: headless",
+        "    history:",
+        "      persist: true",
+        "      maxMessages: 80",
+        "      nativeResume: true",
       ].join("\n")
     );
 
@@ -93,7 +98,80 @@ describe("claudish config.yaml", () => {
       domain: "lark",
       model: "cx@gpt-5.5",
       cwd: "/tmp/feishu-project",
+      sessionMode: "headless",
+      history: {
+        persist: true,
+        maxMessages: 80,
+        nativeResume: true,
+      },
     });
+  });
+
+  test("reads multiple Feishu accounts and defaults account cwd by id", () => {
+    const configPath = join(home, "config.yaml");
+    writeFileSync(
+      configPath,
+      [
+        "service:",
+        "  cwd: /tmp/service-project",
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: donghao",
+        "        appId: cli_donghao",
+        "        appSecret: secret_donghao",
+        "        botOpenId: ou_donghao",
+        "      - id: team",
+        "        appId: cli_team",
+        "        appSecret: secret_team",
+        "        cwd: /tmp/team-feishu",
+      ].join("\n")
+    );
+
+    const config = loadClaudishConfig({
+      configPath,
+      env: {},
+    });
+
+    expect(config.channels.feishuAccounts).toHaveLength(2);
+    expect(config.channels.feishuAccounts[0]).toMatchObject({
+      id: "donghao",
+      appId: "cli_donghao",
+      appSecret: "secret_donghao",
+      botOpenId: "ou_donghao",
+      cwd: join(home, "workspace", "donghao"),
+    });
+    expect(config.channels.feishuAccounts[1]).toMatchObject({
+      id: "team",
+      appId: "cli_team",
+      appSecret: "secret_team",
+      cwd: "/tmp/team-feishu",
+    });
+  });
+
+  test("rejects duplicate Feishu account ids", () => {
+    const configPath = join(home, "config.yaml");
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: same",
+        "        appId: cli_a",
+        "        appSecret: secret_a",
+        "      - id: same",
+        "        appId: cli_b",
+        "        appSecret: secret_b",
+      ].join("\n")
+    );
+
+    expect(() =>
+      loadClaudishConfig({
+        configPath,
+        env: {},
+      })
+    ).toThrow("Duplicate Feishu account id: same");
   });
 
   test("config.yaml values override env and Feishu cwd inherits service cwd", () => {

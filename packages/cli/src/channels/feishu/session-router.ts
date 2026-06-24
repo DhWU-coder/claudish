@@ -3,6 +3,7 @@ import {
   type WebTerminalSession,
   createPythonTerminalSession,
 } from "../../web-terminal-service.js";
+import { stripAnsi } from "./output-relay.js";
 
 export interface FeishuSessionRouterOptions {
   createSession?: (options: CreatePythonTerminalSessionOptions) => WebTerminalSession;
@@ -23,10 +24,14 @@ interface RoutedSession {
   session: WebTerminalSession;
   queue: Promise<void>;
   exited: boolean;
+  trustPromptBuffer: string;
+  trustPromptConfirmed: boolean;
 }
 
 export class FeishuSessionRouter {
-  private readonly createSession: (options: CreatePythonTerminalSessionOptions) => WebTerminalSession;
+  private readonly createSession: (
+    options: CreatePythonTerminalSessionOptions
+  ) => WebTerminalSession;
   private readonly sessions = new Map<string, RoutedSession>();
   private readonly model: string;
   private readonly cwd: string;
@@ -71,6 +76,10 @@ export class FeishuSessionRouter {
     return true;
   }
 
+  resetSession(conversationKey: string): boolean {
+    return this.stopSession(conversationKey);
+  }
+
   stopAll(): void {
     for (const key of this.sessions.keys()) {
       this.stopSession(key);
@@ -81,22 +90,63 @@ export class FeishuSessionRouter {
     const existing = this.sessions.get(conversationKey);
     if (existing && !existing.exited) return existing;
 
-    const routed: RoutedSession = {
+    // biome-ignore lint/style/useConst: 回调需要在会话创建前引用 routed。
+    let routed: RoutedSession;
+    const session = this.createSession({
+      model: this.model,
+      cwd: this.cwd,
+      claudishArgs: ["-y"],
+      env: {
+        ...process.env,
+        CLAUDISH_ASSUME_AUTO_APPROVE_CONFIRMED: "1",
+      },
+      onData: (data) => {
+        if (this.maybeHandleTrustPrompt(routed, data)) return;
+        this.onOutput?.(conversationKey, data);
+      },
+      onExit: (code) => {
+        routed.exited = true;
+        this.onExit?.(conversationKey, code);
+      },
+    });
+    routed = {
       conversationKey,
-      session: this.createSession({
-        model: this.model,
-        cwd: this.cwd,
-        onData: (data) => this.onOutput?.(conversationKey, data),
-        onExit: (code) => {
-          routed.exited = true;
-          this.onExit?.(conversationKey, code);
-        },
-      }),
+      session,
       queue: Promise.resolve(),
       exited: false,
+      trustPromptBuffer: "",
+      trustPromptConfirmed: false,
     };
 
     this.sessions.set(conversationKey, routed);
     return routed;
   }
+
+  private maybeHandleTrustPrompt(routed: RoutedSession, data: string | Uint8Array): boolean {
+    const text = stripAnsi(typeof data === "string" ? data : Buffer.from(data).toString("utf-8"));
+    const compactChunk = compactTrustPromptText(text);
+    routed.trustPromptBuffer = (routed.trustPromptBuffer + text).slice(-8000);
+    const compactBuffer = compactTrustPromptText(routed.trustPromptBuffer);
+    const fullTrustPrompt =
+      compactBuffer.includes("quicksafetycheck") &&
+      (compactBuffer.includes("itrustthisfolder") || compactBuffer.includes("entertoconfirm"));
+    const trustPromptChunk =
+      compactChunk.includes("quicksafetycheck") ||
+      compactChunk.includes("itrustthisfolder") ||
+      compactChunk.includes("entertoconfirm") ||
+      compactChunk.includes("accessingworkspace");
+
+    if (fullTrustPrompt && !routed.trustPromptConfirmed) {
+      routed.trustPromptConfirmed = true;
+      routed.trustPromptBuffer = "";
+      routed.session.write("\n");
+      return true;
+    }
+
+    return trustPromptChunk;
+  }
+}
+
+function compactTrustPromptText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }

@@ -1,13 +1,46 @@
-import * as Lark from "@larksuiteoapi/node-sdk";
 import type { Readable } from "node:stream";
-import type { FeishuEventClient, FeishuMediaClient } from "./channel.js";
+import * as Lark from "@larksuiteoapi/node-sdk";
+import type { FeishuEventClient, FeishuMediaClient, FeishuReactionClient } from "./channel.js";
 import type { FeishuConfig } from "./config.js";
-import { createSdkFeishuMessageClient, type FeishuMessageClient } from "./send.js";
+import { type FeishuMessageClient, createSdkFeishuMessageClient } from "./send.js";
 
 export interface FeishuSdkClients {
   eventClient: FeishuEventClient;
   mediaClient: FeishuMediaClient;
   messageClient: FeishuMessageClient;
+  reactionClient: FeishuReactionClient;
+}
+
+interface FeishuSdkMessageReactionApi {
+  create(input: unknown): Promise<{ data?: { reaction_id?: string } }>;
+  delete(input: unknown): Promise<unknown>;
+}
+
+interface FeishuSdkReactionClientLike {
+  im?: {
+    v1?: {
+      messageReaction?: FeishuSdkMessageReactionApi;
+    };
+    messageReaction?: FeishuSdkMessageReactionApi;
+  };
+}
+
+interface FeishuWsClientLike {
+  start(input: unknown): Promise<void> | void;
+  close(input: unknown): void;
+}
+
+interface FeishuSdkMediaClientLike {
+  im: {
+    v1: {
+      messageResource: {
+        get(input: unknown): Promise<{
+          headers?: Record<string, string>;
+          getReadableStream(): Readable;
+        }>;
+      };
+    };
+  };
 }
 
 export function createFeishuSdkClients(config: FeishuConfig): FeishuSdkClients {
@@ -27,10 +60,11 @@ export function createFeishuSdkClients(config: FeishuConfig): FeishuSdkClients {
     eventClient: createFeishuEventClient(wsClient),
     mediaClient: createFeishuMediaClient(client),
     messageClient: createSdkFeishuMessageClient(client),
+    reactionClient: createSdkFeishuReactionClient(client),
   };
 }
 
-export function createFeishuEventClient(wsClient: any): FeishuEventClient {
+export function createFeishuEventClient(wsClient: FeishuWsClientLike): FeishuEventClient {
   return {
     async start(onEvent) {
       const eventDispatcher = new Lark.EventDispatcher({}).register({
@@ -44,7 +78,7 @@ export function createFeishuEventClient(wsClient: any): FeishuEventClient {
   };
 }
 
-export function createFeishuMediaClient(client: any): FeishuMediaClient {
+export function createFeishuMediaClient(client: FeishuSdkMediaClientLike): FeishuMediaClient {
   return {
     async downloadImage(imageKey, messageId) {
       const response = await client.im.v1.messageResource.get({
@@ -57,6 +91,44 @@ export function createFeishuMediaClient(client: any): FeishuMediaClient {
       };
     },
   };
+}
+
+export function createSdkFeishuReactionClient(
+  client: FeishuSdkReactionClientLike
+): FeishuReactionClient {
+  return {
+    async addTypingReaction(input) {
+      const response = await resolveMessageReactionApi(client).create({
+        path: { message_id: input.messageId },
+        data: {
+          reaction_type: {
+            emoji_type: "Typing",
+          },
+        },
+      });
+      return {
+        reactionId: response?.data?.reaction_id ?? null,
+      };
+    },
+    async removeTypingReaction(input) {
+      await resolveMessageReactionApi(client).delete({
+        path: {
+          message_id: input.messageId,
+          reaction_id: input.reactionId,
+        },
+      });
+    },
+  };
+}
+
+function resolveMessageReactionApi(
+  client: FeishuSdkReactionClientLike
+): FeishuSdkMessageReactionApi {
+  const api = client.im?.v1?.messageReaction ?? client.im?.messageReaction;
+  if (!api) {
+    throw new Error("Feishu message reaction API is unavailable");
+  }
+  return api;
 }
 
 async function readableToBuffer(stream: Readable): Promise<Buffer> {

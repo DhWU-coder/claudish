@@ -69,8 +69,8 @@ function processUserMessage(msg: any, messages: any[], simpleFormat = false) {
       } else if (block.type === "tool_result") {
         if (seen.has(block.tool_use_id)) continue;
         seen.add(block.tool_use_id);
-        const resultContent =
-          typeof block.content === "string" ? block.content : JSON.stringify(block.content);
+        const imageParts = convertToolResultImagesToOpenAI(block.content);
+        const resultContent = stringifyToolResultContent(block.content, imageParts.length > 0);
         if (simpleFormat) {
           // In simple format, include tool results as text in user message
           textParts.push(`[Tool Result]: ${resultContent}`);
@@ -80,6 +80,8 @@ function processUserMessage(msg: any, messages: any[], simpleFormat = false) {
             content: resultContent,
             tool_call_id: block.tool_use_id,
           });
+          // OpenAI 的 tool 消息不能直接携带图片，拆到下一条用户多模态消息里。
+          contentParts.push(...imageParts);
         }
       }
     }
@@ -96,6 +98,59 @@ function processUserMessage(msg: any, messages: any[], simpleFormat = false) {
   } else {
     messages.push({ role: "user", content: msg.content });
   }
+}
+
+interface OpenAIImageUrlPart {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+function stringifyToolResultContent(content: unknown, hasImage: boolean): string {
+  if (typeof content === "string") return content;
+
+  if (Array.isArray(content)) {
+    const text = content.map(stringifyToolResultPart).filter(Boolean).join("\n");
+    return text || (hasImage ? "[Image attached]" : "");
+  }
+
+  return JSON.stringify(content);
+}
+
+function stringifyToolResultPart(part: unknown): string {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return part === undefined ? "" : String(part);
+  const record = part as Record<string, unknown>;
+  if (record.type === "text") return String(record.text ?? "");
+  if (record.type === "image") return "";
+  return JSON.stringify(part);
+}
+
+function convertToolResultImagesToOpenAI(content: unknown): OpenAIImageUrlPart[] {
+  if (!Array.isArray(content)) return [];
+
+  return content
+    .map((part) => {
+      if (!isRecord(part) || part.type !== "image") return null;
+      const source = isRecord(part.source) ? part.source : null;
+      if (
+        !source ||
+        source.type !== "base64" ||
+        typeof source.media_type !== "string" ||
+        typeof source.data !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        type: "image_url",
+        image_url: { url: `data:${source.media_type};base64,${source.data}` },
+      };
+    })
+    .filter((part): part is OpenAIImageUrlPart => Boolean(part));
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return Boolean(input) && typeof input === "object" && !Array.isArray(input);
 }
 
 function processAssistantMessage(msg: any, messages: any[], simpleFormat = false) {

@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { loadFeishuConfig, type FeishuConfig, type FeishuConfigFileInput } from "../channels/feishu/config.js";
+import {
+  type FeishuConfig,
+  type FeishuConfigFileInput,
+  loadFeishuConfig,
+  normalizeAccountId,
+} from "../channels/feishu/config.js";
 import { getClaudishConfigPath, getDefaultWorkspacePath } from "./paths.js";
 import { DEFAULT_SERVICE_PORT, resolvePreferredServicePort } from "./ports.js";
 
@@ -13,6 +18,7 @@ export interface ClaudishConfig {
   };
   channels: {
     feishu: FeishuConfig;
+    feishuAccounts: FeishuConfig[];
   };
 }
 
@@ -34,6 +40,7 @@ interface RawClaudishConfig {
 }
 
 interface RawFeishuConfig {
+  id?: unknown;
   enabled?: unknown;
   appId?: unknown;
   appSecret?: unknown;
@@ -41,6 +48,13 @@ interface RawFeishuConfig {
   domain?: unknown;
   model?: unknown;
   cwd?: unknown;
+  sessionMode?: unknown;
+  history?: {
+    persist?: unknown;
+    maxMessages?: unknown;
+    nativeResume?: unknown;
+  };
+  accounts?: RawFeishuConfig[];
 }
 
 export function loadClaudishConfig(options: LoadClaudishConfigOptions = {}): ClaudishConfig {
@@ -53,10 +67,25 @@ export function loadClaudishConfig(options: LoadClaudishConfigOptions = {}): Cla
   const serviceCwd = expandHomePath(configuredServiceCwd) ?? fallbackCwd;
   const servicePort = readPort(serviceSection.port) ?? resolvePreferredServicePort(env);
   const defaultModel = options.model || trimEnv(env.CLAUDISH_MODEL) || "cx@gpt-5.5";
-  const feishuConfig = normalizeRawFeishuConfig(objectOrEmpty(rawConfig.channels?.feishu));
+  const rawFeishuSection = objectOrEmpty(rawConfig.channels?.feishu);
+  const feishuConfig = normalizeRawFeishuConfig(rawFeishuSection);
   if (!feishuConfig.cwd && configuredServiceCwd) {
     feishuConfig.cwd = serviceCwd;
   }
+  const feishu = loadFeishuConfig(
+    env,
+    {
+      model: defaultModel,
+      cwd: serviceCwd,
+    },
+    feishuConfig
+  );
+  const feishuAccounts = loadFeishuAccounts({
+    env,
+    rawFeishu: rawFeishuSection,
+    defaultModel,
+    legacyFeishu: feishu,
+  });
 
   return {
     service: {
@@ -64,14 +93,8 @@ export function loadClaudishConfig(options: LoadClaudishConfigOptions = {}): Cla
       cwd: serviceCwd,
     },
     channels: {
-      feishu: loadFeishuConfig(
-        env,
-        {
-          model: defaultModel,
-          cwd: serviceCwd,
-        },
-        feishuConfig
-      ),
+      feishu,
+      feishuAccounts,
     },
   };
 }
@@ -95,6 +118,7 @@ export function ensureWorkingDirectory(cwd: string): void {
 
 function normalizeRawFeishuConfig(raw: RawFeishuConfig): FeishuConfigFileInput {
   return {
+    id: readString(raw.id),
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
     appId: readString(raw.appId),
     appSecret: readString(raw.appSecret),
@@ -102,6 +126,47 @@ function normalizeRawFeishuConfig(raw: RawFeishuConfig): FeishuConfigFileInput {
     domain: readString(raw.domain),
     model: readString(raw.model),
     cwd: expandHomePath(readString(raw.cwd)),
+    sessionMode: readString(raw.sessionMode),
+    history: normalizeRawFeishuHistory(raw.history),
+  };
+}
+
+function loadFeishuAccounts(input: {
+  env: NodeJS.ProcessEnv;
+  rawFeishu: RawFeishuConfig;
+  defaultModel: string;
+  legacyFeishu: FeishuConfig;
+}): FeishuConfig[] {
+  if (!Array.isArray(input.rawFeishu.accounts)) return [input.legacyFeishu];
+
+  const seenIds = new Set<string>();
+  return input.rawFeishu.accounts.map((rawAccount) => {
+    const account = normalizeRawFeishuConfig(objectOrEmpty(rawAccount));
+    const id = normalizeAccountId(account.id);
+    if (seenIds.has(id)) {
+      throw new Error(`Duplicate Feishu account id: ${id}`);
+    }
+    seenIds.add(id);
+    return loadFeishuConfig(
+      input.env,
+      {
+        model: input.defaultModel,
+        cwd: account.cwd ?? join(getDefaultWorkspacePath(), id),
+      },
+      {
+        ...account,
+        id,
+      }
+    );
+  });
+}
+
+function normalizeRawFeishuHistory(raw: RawFeishuConfig["history"]) {
+  const history = objectOrEmpty(raw);
+  return {
+    persist: typeof history.persist === "boolean" ? history.persist : undefined,
+    maxMessages: readPositiveInteger(history.maxMessages),
+    nativeResume: typeof history.nativeResume === "boolean" ? history.nativeResume : undefined,
   };
 }
 
@@ -128,6 +193,12 @@ function readPort(value: unknown): number | undefined {
   const port = typeof value === "number" ? value : Number.parseInt(value.trim(), 10);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return DEFAULT_SERVICE_PORT;
   return port;
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  const number = typeof value === "number" ? value : Number.parseInt(value.trim(), 10);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
 function trimEnv(value: string | undefined): string {

@@ -203,7 +203,7 @@ claudish stop
 
 `claudish start` 会在后台启动本地 Web 监控界面和 Channels 管理器；`claudish stop` 停止后台服务，`claudish restart` 重启，`claudish status` 查看当前 pid、Web URL 和频道状态。默认 Web 端口是 `17888`，如果端口被占用会给出 warning 并自动换到后续可用端口。不做开机自启。
 
-飞书第一版使用 WebSocket 长连接，直接把消息送进真实 `claudish` CLI PTY，会话能力与 Web Chat 一致。每个私聊独享一个会话，每个群共享一个会话；当前支持文本和图片，语音、普通文件暂不处理。图片会下载到当前工作目录下 `.claudish/feishu-images/`，再用绝对路径写入 Claude Code 会话。
+飞书集成使用 WebSocket 长连接，并通过飞书专用的 headless `claudish` 会话处理文本和图片消息，所以回复里只保留助手正文，不再混入终端 UI 重绘内容。每个私聊独享一个持久 Claude Code 会话，每个群共享一个持久会话；当前支持文本和图片，语音、普通文件暂不处理。图片会下载到当前工作目录下 `.claudish/feishu-images/`，再用绝对路径写入 Claude Code 会话。
 
 后台服务配置放在 `~/.claudish/config.yaml`。仓库根目录的 [`config-example.yaml`](config-example.yaml) 提供了带中文注释的模板。
 
@@ -221,9 +221,14 @@ channels:
     domain: feishu
     model: cx@gpt-5.5
     cwd: ~/.claudish/workspace
+    sessionMode: headless
+    history:
+      persist: true
+      maxMessages: 50
+      nativeResume: true
 ```
 
-如果不写 `service.cwd`，Claudish 会默认使用 `~/.claudish/workspace`，并在服务启动时自动创建。`channels.feishu.cwd` 不写时继承 `service.cwd`。
+如果不写 `service.cwd`，Claudish 会默认使用 `~/.claudish/workspace`，并在服务启动时自动创建。`channels.feishu.cwd` 不写时继承 `service.cwd`。飞书历史默认保存在 `~/.claudish/channels/feishu/sessions/`。
 
 ```bash
 claudish start

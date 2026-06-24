@@ -269,6 +269,9 @@ describe("Adapter: convertMessagesToOpenAI", () => {
     return mod.convertMessagesToOpenAI;
   }
 
+  const TINY_PNG_B64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+
   test("converts system prompt to system message", async () => {
     const convert = await getConverter();
     const req = {
@@ -326,6 +329,50 @@ describe("Adapter: convertMessagesToOpenAI", () => {
     expect(messages[0].role).toBe("tool");
     expect(messages[0].tool_call_id).toBe("call_123");
     expect(messages[0].content).toBe("file contents here");
+  });
+
+  test("converts user tool_result images to OpenAI image_url content", async () => {
+    const convert = await getConverter();
+    const req = {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_image",
+              content: [
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: "image/png",
+                    data: TINY_PNG_B64,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const messages = convert(req, "test-model");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toEqual({
+      role: "tool",
+      tool_call_id: "call_image",
+      content: "[Image attached]",
+    });
+    expect(messages[1]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${TINY_PNG_B64}` },
+        },
+      ],
+    });
   });
 
   test("Kimi K2.5: empty thinking block still produces reasoning_content field", async () => {

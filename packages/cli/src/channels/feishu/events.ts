@@ -31,6 +31,7 @@ export function parseFeishuMessageEvent(payload: unknown): FeishuMessageEvent | 
   const content = parseContent(message.content);
   const senderId = recordField(sender, "sender_id");
   const chatKind: FeishuChatKind = chatType === "p2p" ? "direct" : "group";
+  const mentions = [...normalizeMentions(message.mentions), ...extractPostMentions(content)];
 
   return {
     messageId: stringField(message.message_id),
@@ -40,9 +41,9 @@ export function parseFeishuMessageEvent(payload: unknown): FeishuMessageEvent | 
     messageType,
     senderOpenId: stringField(senderId?.open_id),
     senderName: stringField(sender.sender_name) || stringField(senderId?.open_id),
-    text: stringField(content.text),
+    text: extractMessageText(messageType, content),
     content,
-    mentions: normalizeMentions(message.mentions),
+    mentions,
     raw: payload,
   };
 }
@@ -54,7 +55,12 @@ export function resolveConversationKey(event: FeishuMessageEvent): string {
 
 export function extractImageKeys(event: FeishuMessageEvent | null | undefined): string[] {
   if (!event) return [];
-  const keys = [event.content.image_key, event.content.imageKey, event.content.file_key]
+  const keys = [
+    event.content.image_key,
+    event.content.imageKey,
+    event.content.file_key,
+    ...extractPostImageKeys(event.content),
+  ]
     .map(stringField)
     .filter(Boolean);
   return Array.from(new Set(keys));
@@ -110,6 +116,89 @@ function normalizeMentions(input: unknown): FeishuMention[] {
   });
 }
 
+function extractMessageText(messageType: string, content: Record<string, unknown>): string {
+  if (messageType === "post") {
+    return renderPostText(content);
+  }
+
+  return stringField(content.text);
+}
+
+function renderPostText(content: Record<string, unknown>): string {
+  return postRowsFromContent(content)
+    .map((row) => row.map(renderPostElement).join("").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function renderPostElement(element: unknown): string {
+  if (!isRecord(element)) return stringField(element);
+
+  const tag = stringField(element.tag).toLowerCase();
+  if (tag === "at") return renderPostMentionElement(element);
+  if (tag === "br") return "\n";
+  if (tag === "img" || tag === "media") return "";
+  if (tag === "a") return stringField(element.text) || stringField(element.href);
+
+  return stringField(element.text) || stringField(element.content);
+}
+
+function renderPostMentionElement(element: Record<string, unknown>): string {
+  const openId = stringField(element.open_id) || stringField(element.user_id);
+  const name =
+    stringField(element.user_name) ||
+    stringField(element.name) ||
+    stringField(element.text) ||
+    stringField(element.content) ||
+    openId;
+  return openId ? `<at user_id="${openId}">${escapeAtName(name)}</at>` : `@${name}`;
+}
+
+function extractPostMentions(content: Record<string, unknown>): FeishuMention[] {
+  return postRowsFromContent(content)
+    .flat()
+    .filter(isRecord)
+    .filter((element) => stringField(element.tag).toLowerCase() === "at")
+    .map((element) => ({
+      openId: stringField(element.open_id) || stringField(element.user_id),
+      name:
+        stringField(element.user_name) ||
+        stringField(element.name) ||
+        stringField(element.text) ||
+        stringField(element.content),
+      key: stringField(element.key),
+    }))
+    .filter((mention) => Boolean(mention.openId));
+}
+
+function extractPostImageKeys(content: Record<string, unknown>): string[] {
+  return postRowsFromContent(content)
+    .flat()
+    .filter(isRecord)
+    .filter((element) => stringField(element.tag).toLowerCase() === "img")
+    .map((element) => stringField(element.image_key) || stringField(element.imageKey))
+    .filter(Boolean);
+}
+
+function postRowsFromContent(content: Record<string, unknown>): unknown[][] {
+  const directRows = postRowsFromValue(content.content);
+  if (directRows.length > 0) return directRows;
+
+  for (const value of Object.values(content)) {
+    if (!isRecord(value)) continue;
+    const localizedRows = postRowsFromValue(value.content);
+    if (localizedRows.length > 0) return localizedRows;
+  }
+
+  return [];
+}
+
+function postRowsFromValue(value: unknown): unknown[][] {
+  if (!Array.isArray(value) || value.length === 0) return [];
+  return value.every(Array.isArray) ? (value as unknown[][]) : [value];
+}
+
 function parseContent(input: unknown): Record<string, unknown> {
   if (typeof input !== "string") return {};
   try {
@@ -123,15 +212,21 @@ function parseContent(input: unknown): Record<string, unknown> {
 }
 
 function recordField(input: unknown, key: string): Record<string, unknown> | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  if (!isRecord(input)) return undefined;
   const value = (input as Record<string, unknown>)[key];
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+  return isRecord(value) ? value : undefined;
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return Boolean(input) && typeof input === "object" && !Array.isArray(input);
 }
 
 function stringField(input: unknown): string {
   return typeof input === "string" ? input.trim() : "";
+}
+
+function escapeAtName(value: string): string {
+  return value.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function escapeRegExp(value: string): string {

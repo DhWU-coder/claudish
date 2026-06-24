@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { saveFeishuImage } from "./images.js";
+import { enhanceFeishuImageForVision, saveFeishuImage } from "./images.js";
 
 let cwd: string;
 
@@ -25,7 +25,9 @@ describe("Feishu image cache", () => {
       contentType: "image/png",
     });
 
-    expect(result.path).toBe(join(cwd, ".claudish", "feishu-images", "group_oc_1", "om_1-img_1.png"));
+    expect(result.path).toBe(
+      join(cwd, ".claudish", "feishu-images", "group_oc_1", "om_1-img_1.png")
+    );
     expect(existsSync(result.path)).toBe(true);
     expect(readFileSync(result.path, "utf-8")).toBe("png-data");
   });
@@ -55,5 +57,54 @@ describe("Feishu image cache", () => {
         contentType: "text/plain",
       })
     ).toThrow("Unsupported Feishu image content type");
+  });
+
+  test("enhances small jpeg images for vision input", async () => {
+    const result = await enhanceFeishuImageForVision(
+      { path: join(cwd, "small.jpg"), contentType: "image/jpeg" },
+      {
+        isAvailable: () => true,
+        readDimensions: async () => ({ width: 892, height: 900 }),
+        resizeImage: async (input) => {
+          expect(input.width).toBe(1784);
+          expect(input.height).toBe(1800);
+        },
+      }
+    );
+
+    expect(result).toEqual({
+      path: join(cwd, "small.vision.png"),
+      contentType: "image/png",
+    });
+  });
+
+  test("keeps large images unchanged", async () => {
+    const result = await enhanceFeishuImageForVision(
+      { path: join(cwd, "large.png"), contentType: "image/png" },
+      {
+        isAvailable: () => true,
+        readDimensions: async () => ({ width: 1800, height: 1200 }),
+        resizeImage: async () => {
+          throw new Error("should not resize");
+        },
+      }
+    );
+
+    expect(result).toEqual({ path: join(cwd, "large.png"), contentType: "image/png" });
+  });
+
+  test("falls back to original image when enhancer is unavailable", async () => {
+    const result = await enhanceFeishuImageForVision(
+      { path: join(cwd, "small.jpg"), contentType: "image/jpeg" },
+      {
+        isAvailable: () => false,
+        readDimensions: async () => ({ width: 892, height: 900 }),
+        resizeImage: async () => {
+          throw new Error("should not resize");
+        },
+      }
+    );
+
+    expect(result).toEqual({ path: join(cwd, "small.jpg"), contentType: "image/jpeg" });
   });
 });

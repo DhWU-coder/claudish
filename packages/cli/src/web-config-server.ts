@@ -3425,18 +3425,31 @@ function renderConfigPage(): string {
         const channels = Array.isArray(status?.channels) ? status.channels : [];
         channelsStatusEl.textContent =
           channels.length === 0 ? t("channels.none") : t("usage.requestCount", { count: channels.length });
-        const feishu = channels.find((channel) => channel.id === "feishu") || {
+        const feishuChannels = channels.filter(
+          (channel) => channel.id === "feishu" || String(channel.id || "").startsWith("feishu:")
+        );
+        const rows = feishuChannels.length > 0 ? feishuChannels : [{
           id: "feishu",
           status: "not_configured",
           activeSessions: 0,
-        };
+        }];
         channelFeishuStatusEl.replaceChildren(
-          channelRowTitle(t("channels.feishu")),
-          channelStatusRow(t("channels.status"), feishu.status || "unknown"),
-          channelStatusRow(t("channels.sessions"), String(feishu.activeSessions || 0)),
-          channelStatusRow(t("channels.model"), feishu.model || "-"),
-          channelStatusRow(t("channels.cwd"), feishu.cwd || "-")
+          ...rows.flatMap((feishu) => [
+            channelRowTitle(resolveFeishuChannelTitle(feishu)),
+            channelStatusRow(t("channels.status"), feishu.status || "unknown"),
+            channelStatusRow(t("channels.sessions"), String(feishu.activeSessions || 0)),
+            channelStatusRow(t("channels.model"), feishu.model || "-"),
+            channelStatusRow(t("channels.cwd"), feishu.cwd || "-"),
+          ])
         );
+      }
+
+      // 多飞书账号时，在同一个频道面板里按账号拆开展示。
+      function resolveFeishuChannelTitle(channel) {
+        const accountId = channel.accountId || String(channel.id || "").replace(/^feishu:?/, "") || "";
+        return accountId && accountId !== "default"
+          ? t("channels.feishu") + " (" + accountId + ")"
+          : t("channels.feishu");
       }
 
       // 生成频道面板标题。

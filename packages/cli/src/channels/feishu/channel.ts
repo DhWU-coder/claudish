@@ -1,4 +1,6 @@
+import type { FeishuConfig } from "./config.js";
 import {
+  type FeishuMessageEvent,
   buildClaudeCodeInputForFeishu,
   extractImageKeys,
   parseFeishuMessageEvent,
@@ -6,11 +8,12 @@ import {
   shouldHandleMessage,
   stripBotMention,
 } from "./events.js";
-import { saveFeishuImage } from "./images.js";
+import type { FeishuHeadlessRunner } from "./headless-runner.js";
+import { FeishuHeadlessSessionRouter } from "./headless-session-router.js";
+import { type SavedFeishuImage, saveFeishuImage } from "./images.js";
 import { FeishuOutputRelay } from "./output-relay.js";
-import { FeishuSessionRouter, type FeishuRoutedSessionStatus } from "./session-router.js";
-import type { FeishuConfig } from "./config.js";
-import { sendFeishuText, type FeishuMessageClient } from "./send.js";
+import { type FeishuMessageClient, sendFeishuText } from "./send.js";
+import { type FeishuRoutedSessionStatus, FeishuSessionRouter } from "./session-router.js";
 
 export interface FeishuEventClient {
   start(onEvent: (payload: unknown) => Promise<void> | void): Promise<void> | void;
@@ -24,9 +27,16 @@ export interface FeishuMediaClient {
   ): Promise<{ buffer: Buffer | Uint8Array; contentType: string }>;
 }
 
+export interface FeishuReactionClient {
+  addTypingReaction(input: { messageId: string }): Promise<{ reactionId: string | null }>;
+  removeTypingReaction(input: { messageId: string; reactionId: string }): Promise<void>;
+}
+
 export interface FeishuSessionRouterLike {
   send(conversationKey: string, text: string): Promise<void>;
   listSessions(): FeishuRoutedSessionStatus[];
+  resetSession?(conversationKey: string): boolean;
+  stopSession?(conversationKey: string): boolean;
   stopAll(): void;
 }
 
@@ -34,38 +44,49 @@ export interface FeishuChannelOptions {
   config: FeishuConfig;
   eventClient?: FeishuEventClient;
   mediaClient?: FeishuMediaClient;
+  imageVisionEnhancer?: (image: SavedFeishuImage) => Promise<SavedFeishuImage>;
   messageClient?: FeishuMessageClient;
+  reactionClient?: FeishuReactionClient;
   sessionRouter?: FeishuSessionRouterLike;
+  headlessRunner?: FeishuHeadlessRunner;
+  historyBaseDir?: string;
   outputQuietMs?: number;
+  messageDedupeTtlMs?: number;
+  now?: () => number;
   logger?: Pick<Console, "warn" | "error" | "log">;
 }
 
 export class FeishuChannel {
-  readonly id = "feishu";
+  readonly id: string;
   private readonly config: FeishuConfig;
   private readonly eventClient: FeishuEventClient;
   private readonly mediaClient?: FeishuMediaClient;
+  private readonly imageVisionEnhancer: (image: SavedFeishuImage) => Promise<SavedFeishuImage>;
   private readonly messageClient?: FeishuMessageClient;
+  private readonly reactionClient?: FeishuReactionClient;
   private readonly sessionRouter: FeishuSessionRouterLike;
   private readonly outputQuietMs: number;
+  private readonly messageDedupeTtlMs: number;
+  private readonly now: () => number;
   private readonly logger: Pick<Console, "warn" | "error" | "log">;
   private readonly replyTargets = new Map<string, string>();
   private readonly outputRelays = new Map<string, FeishuOutputRelay>();
+  private readonly handledMessageIds = new Map<string, number>();
+  private readonly pendingEventTasks = new Set<Promise<void>>();
   private status: string;
 
   constructor(options: FeishuChannelOptions) {
     this.config = options.config;
+    this.id = resolveFeishuChannelId(options.config.id);
     this.eventClient = options.eventClient ?? noopEventClient();
     this.mediaClient = options.mediaClient;
+    this.imageVisionEnhancer = options.imageVisionEnhancer ?? ((image) => Promise.resolve(image));
     this.messageClient = options.messageClient;
+    this.reactionClient = options.reactionClient;
     this.outputQuietMs = options.outputQuietMs ?? 800;
-    this.sessionRouter =
-      options.sessionRouter ??
-      new FeishuSessionRouter({
-        model: options.config.model,
-        cwd: options.config.cwd,
-        onOutput: (conversationKey, data) => this.handleSessionOutput(conversationKey, data),
-      });
+    this.messageDedupeTtlMs = options.messageDedupeTtlMs ?? 10 * 60 * 1000;
+    this.now = options.now ?? (() => Date.now());
+    this.sessionRouter = options.sessionRouter ?? this.createDefaultSessionRouter(options);
     this.logger = options.logger ?? console;
     this.status = options.config.enabled ? "configured" : "not_configured";
   }
@@ -94,9 +115,10 @@ export class FeishuChannel {
   getStatus() {
     const sessions = this.sessionRouter.listSessions();
     return {
-      id: "feishu",
+      id: this.id,
       status: this.status,
       activeSessions: sessions.filter((session) => session.status === "running").length,
+      ...(this.config.id && this.config.id !== "default" ? { accountId: this.config.id } : {}),
       model: this.config.model,
       cwd: this.config.cwd,
     };
@@ -108,24 +130,72 @@ export class FeishuChannel {
 
     const botOpenId = this.config.botOpenId ?? "";
     if (!shouldHandleMessage(event, botOpenId)) return;
+    if (!this.claimMessageId(event.messageId)) return;
 
-    const imagePaths = await this.saveEventImages(event);
-    const text = stripBotMention(event.text, event.mentions, botOpenId);
-    if (!text && imagePaths.length === 0) return;
+    this.enqueueEventProcessing(event);
+  }
 
-    const conversationKey = resolveConversationKey(event);
-    this.replyTargets.set(conversationKey, event.messageId);
+  private async processMessageEvent(event: FeishuMessageEvent): Promise<void> {
+    const typingReaction = await this.addTypingReaction(event.messageId);
+    try {
+      const botOpenId = this.config.botOpenId ?? "";
+      const imagePaths = await this.saveEventImages(event);
+      const text = stripBotMention(event.text, event.mentions, botOpenId);
+      if (!text && imagePaths.length === 0) return;
 
-    await this.sessionRouter.send(
-      conversationKey,
-      buildClaudeCodeInputForFeishu({
+      const conversationKey = resolveConversationKey(event);
+      this.replyTargets.set(conversationKey, event.messageId);
+
+      const command = parseFeishuCommand(text);
+      if (command) {
+        await this.handleCommand(conversationKey, command);
+        return;
+      }
+
+      const claudishInput = buildClaudeCodeInputForFeishu({
         chatKind: event.chatKind,
         chatId: event.chatId,
         senderName: event.senderName || event.senderOpenId,
         text,
         imagePaths,
-      })
-    );
+      });
+      if (this.messageClient) {
+        this.getOutputRelay(conversationKey).suppressEcho(claudishInput);
+      }
+
+      await this.sessionRouter.send(conversationKey, claudishInput);
+    } finally {
+      await this.removeTypingReaction(typingReaction);
+    }
+  }
+
+  private enqueueEventProcessing(event: FeishuMessageEvent): void {
+    const task = this.processMessageEvent(event).catch((error) => {
+      this.logger.error(error instanceof Error ? error.message : String(error));
+    });
+    this.pendingEventTasks.add(task);
+    task.finally(() => {
+      this.pendingEventTasks.delete(task);
+    });
+  }
+
+  private claimMessageId(messageId: string): boolean {
+    if (!messageId) return true;
+
+    const now = this.now();
+    this.pruneHandledMessageIds(now);
+    if (this.handledMessageIds.has(messageId)) return false;
+
+    this.handledMessageIds.set(messageId, now);
+    return true;
+  }
+
+  private pruneHandledMessageIds(now: number): void {
+    for (const [messageId, handledAt] of this.handledMessageIds) {
+      if (now - handledAt > this.messageDedupeTtlMs) {
+        this.handledMessageIds.delete(messageId);
+      }
+    }
   }
 
   handleSessionOutput(conversationKey: string, data: string | Uint8Array): void {
@@ -133,23 +203,25 @@ export class FeishuChannel {
     this.getOutputRelay(conversationKey).append(data);
   }
 
-  private async saveEventImages(event: ReturnType<typeof parseFeishuMessageEvent>): Promise<string[]> {
+  private async saveEventImages(
+    event: ReturnType<typeof parseFeishuMessageEvent>
+  ): Promise<string[]> {
     if (!event || !this.mediaClient) return [];
 
     const imagePaths: string[] = [];
     for (const imageKey of extractImageKeys(event)) {
       try {
         const image = await this.mediaClient.downloadImage(imageKey, event.messageId);
-        imagePaths.push(
-          saveFeishuImage({
-            cwd: this.config.cwd,
-            conversationKey: resolveConversationKey(event),
-            messageId: event.messageId,
-            imageKey,
-            buffer: image.buffer,
-            contentType: image.contentType,
-          }).path
-        );
+        const savedImage = saveFeishuImage({
+          cwd: this.config.cwd,
+          conversationKey: resolveConversationKey(event),
+          messageId: event.messageId,
+          imageKey,
+          buffer: image.buffer,
+          contentType: image.contentType,
+        });
+        const visionImage = await this.imageVisionEnhancer(savedImage);
+        imagePaths.push(visionImage.path);
       } catch (error) {
         this.logger.warn(error instanceof Error ? error.message : String(error));
       }
@@ -163,6 +235,9 @@ export class FeishuChannel {
 
     const relay = new FeishuOutputRelay({
       quietMs: this.outputQuietMs,
+      onError: (error) => {
+        this.logger.error(`Feishu reply failed: ${formatError(error)}`);
+      },
       sendText: async (text) => {
         const replyToMessageId = this.replyTargets.get(conversationKey);
         if (!replyToMessageId || !this.messageClient) return;
@@ -172,6 +247,99 @@ export class FeishuChannel {
     this.outputRelays.set(conversationKey, relay);
     return relay;
   }
+
+  private async handleCommand(conversationKey: string, command: FeishuCommand): Promise<void> {
+    if (command === "new" || command === "clear") {
+      if (this.sessionRouter.resetSession) {
+        this.sessionRouter.resetSession(conversationKey);
+      } else {
+        this.sessionRouter.stopSession?.(conversationKey);
+      }
+      this.disposeRelay(conversationKey);
+      await this.replyCommand(conversationKey, "已开启新会话。");
+      return;
+    }
+
+    this.sessionRouter.stopSession?.(conversationKey);
+    this.disposeRelay(conversationKey);
+    await this.replyCommand(conversationKey, "已停止当前会话。");
+  }
+
+  private async replyCommand(conversationKey: string, text: string): Promise<void> {
+    const replyToMessageId = this.replyTargets.get(conversationKey);
+    if (!replyToMessageId || !this.messageClient) return;
+    await sendFeishuText(this.messageClient, { replyToMessageId, text });
+  }
+
+  private disposeRelay(conversationKey: string): void {
+    this.outputRelays.get(conversationKey)?.dispose();
+    this.outputRelays.delete(conversationKey);
+  }
+
+  private async addTypingReaction(
+    messageId: string
+  ): Promise<{ messageId: string; reactionId: string | null } | undefined> {
+    if (!this.reactionClient || !messageId) return undefined;
+    try {
+      const result = await this.reactionClient.addTypingReaction({ messageId });
+      return {
+        messageId,
+        reactionId: result.reactionId,
+      };
+    } catch (error) {
+      this.logger.warn(`Feishu typing reaction add failed: ${formatError(error)}`);
+      return undefined;
+    }
+  }
+
+  private async removeTypingReaction(
+    state: { messageId: string; reactionId: string | null } | undefined
+  ): Promise<void> {
+    if (!this.reactionClient || !state?.reactionId) return;
+    try {
+      await this.reactionClient.removeTypingReaction({
+        messageId: state.messageId,
+        reactionId: state.reactionId,
+      });
+    } catch (error) {
+      this.logger.warn(`Feishu typing reaction remove failed: ${formatError(error)}`);
+    }
+  }
+
+  private createDefaultSessionRouter(options: FeishuChannelOptions): FeishuSessionRouterLike {
+    const onOutput = (conversationKey: string, data: string | Uint8Array) =>
+      this.handleSessionOutput(conversationKey, data);
+    if (options.config.sessionMode === "terminal") {
+      return new FeishuSessionRouter({
+        model: options.config.model,
+        cwd: options.config.cwd,
+        onOutput,
+      });
+    }
+
+    return new FeishuHeadlessSessionRouter({
+      model: options.config.model,
+      cwd: options.config.cwd,
+      history: options.config.history,
+      historyBaseDir: options.historyBaseDir,
+      runHeadless: options.headlessRunner,
+      onOutput,
+    });
+  }
+}
+
+function resolveFeishuChannelId(accountId: string | undefined): string {
+  return !accountId || accountId === "default" ? "feishu" : `feishu:${accountId}`;
+}
+
+type FeishuCommand = "new" | "clear" | "stop";
+
+function parseFeishuCommand(text: string): FeishuCommand | null {
+  const command = text.trim().toLowerCase();
+  if (command === "/new") return "new";
+  if (command === "/clear") return "clear";
+  if (command === "/stop") return "stop";
+  return null;
 }
 
 function noopEventClient(): FeishuEventClient {
@@ -179,4 +347,8 @@ function noopEventClient(): FeishuEventClient {
     start() {},
     stop() {},
   };
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

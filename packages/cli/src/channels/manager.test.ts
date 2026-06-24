@@ -106,4 +106,63 @@ describe("ChannelManager", () => {
     });
     expect(manager.getStatus().channels[0].id).toBe("feishu");
   });
+
+  test("builds one Feishu channel for each configured account", () => {
+    const configs: FeishuConfig[] = [];
+    const manager = new ChannelManager({
+      config: {
+        service: { port: 18123, cwd: "/tmp/service" },
+        channels: {
+          feishu: {
+            id: "default",
+            enabled: false,
+            status: "not_configured",
+            domain: "feishu",
+            model: "cx@gpt-5.5",
+            cwd: "/tmp/service",
+            sessionMode: "headless",
+            history: { persist: true, maxMessages: 50, nativeResume: true },
+          },
+          feishuAccounts: [
+            {
+              id: "donghao",
+              enabled: true,
+              status: "configured",
+              appId: "cli_donghao",
+              appSecret: "secret_donghao",
+              botOpenId: "ou_donghao",
+              domain: "feishu",
+              model: "cx@gpt-5.5",
+              cwd: "/tmp/service/donghao",
+              sessionMode: "headless",
+              history: { persist: true, maxMessages: 50, nativeResume: true },
+            },
+            {
+              id: "team",
+              enabled: true,
+              status: "configured",
+              appId: "cli_team",
+              appSecret: "secret_team",
+              botOpenId: "ou_team",
+              domain: "feishu",
+              model: "cx@gpt-5.5",
+              cwd: "/tmp/service/team",
+              sessionMode: "headless",
+              history: { persist: true, maxMessages: 50, nativeResume: true },
+            },
+          ],
+        },
+      },
+      createFeishuChannel(input) {
+        configs.push(input);
+        return fakeChannel(`feishu:${input.id}`, []);
+      },
+    });
+
+    expect(configs.map((config) => config.id)).toEqual(["donghao", "team"]);
+    expect(manager.getStatus().channels.map((channel) => channel.id)).toEqual([
+      "feishu:donghao",
+      "feishu:team",
+    ]);
+  });
 });

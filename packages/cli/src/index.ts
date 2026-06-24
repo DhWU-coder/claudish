@@ -317,7 +317,14 @@ async function runCli() {
     // If --stdin is set, skip the prompt — no human to confirm when piping input.
     const rawArgs = process.argv.slice(2);
     const explicitNoAutoApprove = rawArgs.includes("--no-auto-approve");
-    if (cliConfig.autoApprove && !explicitNoAutoApprove && !cliConfig.stdin) {
+    const assumeAutoApproveConfirmed =
+      process.env.CLAUDISH_ASSUME_AUTO_APPROVE_CONFIRMED === "1";
+    if (
+      cliConfig.autoApprove &&
+      !explicitNoAutoApprove &&
+      !cliConfig.stdin &&
+      !assumeAutoApproveConfirmed
+    ) {
       const { loadConfig, saveConfig } = await import("./profile-config.js");
       try {
         const cfg = loadConfig();

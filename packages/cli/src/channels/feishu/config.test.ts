@@ -8,6 +8,12 @@ describe("Feishu config", () => {
       status: "not_configured",
       model: "cx@gpt-5.5",
       cwd: "/tmp/project",
+      sessionMode: "headless",
+      history: {
+        persist: true,
+        maxMessages: 50,
+        nativeResume: true,
+      },
     });
   });
 
@@ -96,6 +102,33 @@ describe("Feishu config", () => {
       status: "not_configured",
       appId: "cli_yaml",
       appSecret: "yaml_secret",
+    });
+  });
+
+  test("config.yaml reads headless session and history settings", () => {
+    expect(
+      loadFeishuConfig(
+        {
+          FEISHU_APP_ID: "cli_env",
+          FEISHU_APP_SECRET: "env_secret",
+        },
+        { model: "cx@gpt-5.5", cwd: "/tmp/project" },
+        {
+          sessionMode: "terminal",
+          history: {
+            persist: false,
+            maxMessages: 12,
+            nativeResume: false,
+          },
+        }
+      )
+    ).toMatchObject({
+      sessionMode: "terminal",
+      history: {
+        persist: false,
+        maxMessages: 12,
+        nativeResume: false,
+      },
     });
   });
 });

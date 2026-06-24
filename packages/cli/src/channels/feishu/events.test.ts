@@ -55,6 +55,36 @@ describe("Feishu events", () => {
     expect(extractImageKeys(event)).toEqual(["img_v2_abc"]);
   });
 
+  test("extracts post text, mentions, and embedded image keys", () => {
+    const event = parseFeishuMessageEvent(
+      messageEvent({
+        message: {
+          message_id: "om_post",
+          chat_id: "oc_group",
+          chat_type: "group",
+          message_type: "post",
+          content: JSON.stringify({
+            content: [
+              [
+                { tag: "at", user_id: botOpenId, user_name: "bot" },
+                { tag: "text", text: " 你看到了什么" },
+                { tag: "img", image_key: "img_post_1" },
+              ],
+            ],
+          }),
+          mentions: [],
+        },
+      })
+    );
+
+    expect(event?.text).toContain(`<at user_id="${botOpenId}">bot</at>`);
+    expect(stripBotMention(event?.text ?? "", event?.mentions ?? [], botOpenId)).toBe(
+      "你看到了什么"
+    );
+    expect(extractImageKeys(event)).toEqual(["img_post_1"]);
+    expect(shouldHandleMessage(event!, botOpenId)).toBe(true);
+  });
+
   test("maps private chat to sender scoped conversation", () => {
     const event = parseFeishuMessageEvent(
       messageEvent({
@@ -98,7 +128,11 @@ describe("Feishu events", () => {
 
   test("stripBotMention removes Feishu at markup", () => {
     expect(
-      stripBotMention(`<at user_id="${botOpenId}">bot</at> hello`, [{ openId: botOpenId }], botOpenId)
+      stripBotMention(
+        `<at user_id="${botOpenId}">bot</at> hello`,
+        [{ openId: botOpenId }],
+        botOpenId
+      )
     ).toBe("hello");
   });
 
