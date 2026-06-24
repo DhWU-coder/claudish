@@ -1991,19 +1991,19 @@ function printAIAgentGuide(): void {
 }
 
 /**
- * Initialize Claudish skill in current project
+ * 在当前项目中初始化 Claudish skill。
  */
 async function initializeClaudishSkill(): Promise<void> {
   console.log("🔧 Initializing Claudish skill in current project...\n");
 
-  // Get current working directory
+  // 获取当前工作目录。
   const cwd = process.cwd();
   const claudeDir = join(cwd, ".claude");
   const skillsDir = join(claudeDir, "skills");
   const claudishSkillDir = join(skillsDir, "claudish-usage");
   const skillFile = join(claudishSkillDir, "SKILL.md");
 
-  // Check if skill already exists
+  // 如果已经安装过，避免覆盖用户本地内容。
   if (existsSync(skillFile)) {
     console.log("✅ Claudish skill already installed at:");
     console.log(`   ${skillFile}\n`);
@@ -2011,14 +2011,15 @@ async function initializeClaudishSkill(): Promise<void> {
     return;
   }
 
-  // Get source skill file from Claudish installation
+  // 从当前私有仓库构建产物中读取 skill 源文件。
   const sourceSkillPath = join(__dirname, "../skills/claudish-usage/SKILL.md");
 
   if (!existsSync(sourceSkillPath)) {
     console.error("❌ Error: Claudish skill file not found in installation.");
     console.error(`   Expected at: ${sourceSkillPath}`);
-    console.error("\n💡 Try reinstalling Claudish:");
-    console.error("   npm install -g claudish@latest");
+    console.error("\n💡 Try updating or rebuilding your private Claudish repository:");
+    console.error("   claudish update");
+    console.error("   # or: bun run build:cli");
     process.exit(1);
   }
 

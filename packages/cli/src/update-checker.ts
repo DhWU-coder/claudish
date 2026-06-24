@@ -1,104 +1,27 @@
 /**
- * Auto-update checker for Claudish
+ * 私有仓库版本的更新检查。
  *
- * Checks npm registry for new versions and shows a notification.
- * Caches the check result to avoid checking on every run (once per day).
- * This is notification-only — actual updates are done via `claudish update`.
+ * 启动时不再访问 npm registry，也不再比较公网 claudish 包版本。
+ * 真正的更新只通过 `claudish update` 执行当前 Git 仓库的自动更新流程。
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const isWindows = platform() === "win32";
 
-const NPM_REGISTRY_URL = "https://registry.npmjs.org/claudish/latest";
-
-const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-// ANSI color codes
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const GREEN = "\x1b[32m";
-const CYAN = "\x1b[36m";
-const DIM = "\x1b[2m";
-
-interface UpdateCache {
-  lastCheck: number;
-  latestVersion: string | null;
-}
-
-/**
- * Get cache file path
- * Uses platform-appropriate cache directory:
- * - Windows: %LOCALAPPDATA%\claudish or %USERPROFILE%\AppData\Local\claudish
- * - Unix/macOS: ~/.cache/claudish
- */
 function getCacheFilePath(): string {
-  let cacheDir: string;
-
   if (isWindows) {
-    // Windows: Use LOCALAPPDATA or fall back to AppData\Local
     const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-    cacheDir = join(localAppData, "claudish");
-  } else {
-    // Unix/macOS: Use ~/.cache/claudish
-    cacheDir = join(homedir(), ".cache", "claudish");
+    return join(localAppData, "claudish", "update-check.json");
   }
 
-  try {
-    if (!existsSync(cacheDir)) {
-      mkdirSync(cacheDir, { recursive: true });
-    }
-    return join(cacheDir, "update-check.json");
-  } catch {
-    // Fall back to temp directory if home cache fails
-    return join(tmpdir(), "claudish-update-check.json");
-  }
+  return join(homedir(), ".cache", "claudish", "update-check.json");
 }
 
 /**
- * Read cached update check result
- */
-function readCache(): UpdateCache | null {
-  try {
-    const cachePath = getCacheFilePath();
-    if (!existsSync(cachePath)) {
-      return null;
-    }
-    const data = JSON.parse(readFileSync(cachePath, "utf-8"));
-    return data as UpdateCache;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Write update check result to cache
- */
-function writeCache(latestVersion: string | null): void {
-  try {
-    const cachePath = getCacheFilePath();
-    const data: UpdateCache = {
-      lastCheck: Date.now(),
-      latestVersion,
-    };
-    writeFileSync(cachePath, JSON.stringify(data), "utf-8");
-  } catch {
-    // Silently fail - caching is optional
-  }
-}
-
-/**
- * Check if cache is still valid (less than 24 hours old)
- */
-function isCacheValid(cache: UpdateCache): boolean {
-  const age = Date.now() - cache.lastCheck;
-  return age < CACHE_MAX_AGE_MS;
-}
-
-/**
- * Clear the update cache (called after successful update)
+ * 清理旧版公网更新检查留下的缓存文件。
  */
 export function clearCache(): void {
   try {
@@ -107,13 +30,19 @@ export function clearCache(): void {
       unlinkSync(cachePath);
     }
   } catch {
-    // Silently fail
+    const fallbackPath = join(tmpdir(), "claudish-update-check.json");
+    try {
+      if (existsSync(fallbackPath)) {
+        unlinkSync(fallbackPath);
+      }
+    } catch {
+      // 清理缓存失败不影响主流程。
+    }
   }
 }
 
 /**
- * Semantic version comparison
- * Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+ * 语义化版本比较工具，保留给内部代码复用。
  */
 export function compareVersions(v1: string, v2: string): number {
   const parts1 = v1.replace(/^v/, "").split(".").map(Number);
@@ -129,78 +58,20 @@ export function compareVersions(v1: string, v2: string): number {
 }
 
 /**
- * Fetch latest version from npm registry
+ * 私有仓库版本没有公网 latest 概念。
  */
 export async function fetchLatestVersion(): Promise<string | null> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
-
-    const response = await fetch(NPM_REGISTRY_URL, {
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
-
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as { version?: string };
-    return data.version || null;
-  } catch {
-    // Network error, timeout, or parsing error - silently fail
-    return null;
-  }
+  return null;
 }
 
 /**
- * Check for updates and show notification
- *
- * Uses a cache to avoid checking npm on every run (once per 24 hours).
- * This is notification-only — does not auto-update or prompt.
- *
- * @param currentVersion - Current installed version
- * @param options - Configuration options
+ * 启动时保持静默，避免任何公网更新提示。
  */
 export async function checkForUpdates(
-  currentVersion: string,
-  options: {
+  _currentVersion: string,
+  _options: {
     quiet?: boolean;
   } = {}
 ): Promise<void> {
-  const { quiet = false } = options;
-
-  let latestVersion: string | null = null;
-
-  // Check cache first
-  const cache = readCache();
-  if (cache && isCacheValid(cache)) {
-    // Use cached version
-    latestVersion = cache.latestVersion;
-  } else {
-    // Cache is stale or doesn't exist - fetch from npm
-    latestVersion = await fetchLatestVersion();
-    // Update cache (even if null - to avoid repeated failed requests)
-    writeCache(latestVersion);
-  }
-
-  if (!latestVersion) {
-    // Couldn't fetch - silently continue
-    return;
-  }
-
-  // Compare versions
-  if (compareVersions(latestVersion, currentVersion) <= 0) {
-    // Already up to date
-    return;
-  }
-
-  // New version available — show single-line notification
-  if (!quiet) {
-    console.error("");
-    console.error(`  ${CYAN}\u250c${RESET} ${BOLD}Update available:${RESET} ${currentVersion} ${DIM}\u2192${RESET} ${GREEN}${latestVersion}${RESET}   ${DIM}Run:${RESET} ${BOLD}${CYAN}claudish update${RESET}`);
-    console.error("");
-  }
+  clearCache();
 }
