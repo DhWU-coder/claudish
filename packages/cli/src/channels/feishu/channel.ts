@@ -14,7 +14,13 @@ import {
 } from "./events.js";
 import { type SavedFeishuFile, saveFeishuFile } from "./files.js";
 import type { FeishuHeadlessProgressEvent, FeishuHeadlessRunner } from "./headless-runner.js";
-import { FeishuHeadlessSessionRouter } from "./headless-session-router.js";
+import {
+  type FeishuArchivedSessionDetail,
+  type FeishuArchivedSessionSwitchResult,
+  FeishuHeadlessSessionRouter,
+  type FeishuSessionSummaryWithAi,
+} from "./headless-session-router.js";
+import type { FeishuSessionAiSummary, FeishuSessionSummary } from "./history.js";
 import { type SavedFeishuImage, saveFeishuImage } from "./images.js";
 import { FeishuMessageProgressTracker } from "./message-tracker.js";
 import { FeishuOutputRelay, cleanTerminalOutput } from "./output-relay.js";
@@ -59,6 +65,24 @@ export interface FeishuReactionClient {
 export interface FeishuSessionRouterLike {
   send(conversationKey: string, text: string, context?: FeishuSessionSendContext): Promise<void>;
   listSessions(): FeishuRoutedSessionStatus[];
+  listArchivedSessions?(conversationKey: string): FeishuSessionSummary[];
+  getCurrentArchivedSession?(conversationKey: string): FeishuSessionSummary | null;
+  getArchivedSessionDetail?(
+    conversationKey: string,
+    selection?: number | string
+  ): FeishuArchivedSessionDetail | null;
+  summarizeArchivedSessions?(
+    conversationKey: string,
+    count: FeishuSessionCount
+  ): Promise<FeishuSessionSummaryWithAi[]>;
+  resumeArchivedSession?(
+    conversationKey: string,
+    selection: number | string
+  ): FeishuArchivedSessionSwitchResult;
+  forkArchivedSession?(
+    conversationKey: string,
+    selection: number | string
+  ): FeishuArchivedSessionSwitchResult;
   resetSession?(conversationKey: string): boolean;
   stopSession?(conversationKey: string): boolean;
   stopAll(): void;
@@ -545,10 +569,59 @@ export class FeishuChannel {
       return;
     }
 
+    if (isArchivedSessionCommand(command)) {
+      await this.handleArchivedSessionCommand(
+        conversationKey,
+        command,
+        messageId,
+        replyToMessageId
+      );
+      return;
+    }
+
     this.sessionRouter.stopSession?.(conversationKey);
     this.disposeRelay(conversationKey);
     await this.replyCommand("已停止当前会话。", replyToMessageId);
     this.messageTracker.update(messageId, { stage: "stopped" });
+  }
+
+  private async handleArchivedSessionCommand(
+    conversationKey: string,
+    command: ArchivedSessionCommand,
+    messageId: string,
+    replyToMessageId: string
+  ): Promise<void> {
+    if (command.type === "sessions") {
+      await this.replyCommand(
+        await this.buildArchivedSessionsReply(conversationKey, command),
+        replyToMessageId
+      );
+      this.messageTracker.update(messageId, { stage: "completed" });
+      return;
+    }
+
+    if (command.type === "session") {
+      const text =
+        command.selection === undefined
+          ? this.buildCurrentArchivedSessionReply(conversationKey)
+          : this.buildArchivedSessionHistoryReply(conversationKey, command.selection);
+      await this.replyCommand(text, replyToMessageId);
+      this.messageTracker.update(messageId, { stage: "completed" });
+      return;
+    }
+
+    const result =
+      command.type === "resume"
+        ? this.sessionRouter.resumeArchivedSession?.(conversationKey, command.selection)
+        : this.sessionRouter.forkArchivedSession?.(conversationKey, command.selection);
+    await this.replyCommand(
+      formatArchivedSessionSwitchReply(result, command.type),
+      replyToMessageId
+    );
+    if (result?.ok) {
+      this.disposeRelay(conversationKey);
+    }
+    this.messageTracker.update(messageId, { stage: "completed" });
   }
 
   private buildStatusReply(conversationKey: string): string {
@@ -567,6 +640,82 @@ export class FeishuChannel {
       `工作目录：${this.config.cwd}`,
       `最近消息：${recentMessages.length}`,
     ].join("\n");
+  }
+
+  private async buildArchivedSessionsReply(
+    conversationKey: string,
+    command: Extract<FeishuCommand, { type: "sessions" }>
+  ): Promise<string> {
+    if (!this.sessionRouter.listArchivedSessions) {
+      return "当前会话模式不支持查看历史 session。";
+    }
+
+    const sessions = this.sessionRouter.listArchivedSessions(conversationKey);
+    if (sessions.length === 0) return "还没有可恢复的历史 session。";
+
+    const summaryByArchiveId = new Map<string, FeishuSessionAiSummary>();
+    if (command.summaryCount !== undefined) {
+      if (!this.sessionRouter.summarizeArchivedSessions) {
+        return "当前会话模式不支持 session 总结。";
+      }
+      const summarized = await this.sessionRouter.summarizeArchivedSessions(
+        conversationKey,
+        command.summaryCount
+      );
+      for (const session of summarized) {
+        summaryByArchiveId.set(session.archiveId, session.aiSummary);
+      }
+    }
+
+    const sessionsToList = limitFeishuSessionList(sessions, command.listCount);
+    return [
+      command.summaryCount === undefined ? "历史 session：" : "历史 session summary：",
+      ...sessionsToList.map((session, index) =>
+        formatArchivedSessionLine(session, index, summaryByArchiveId.get(session.archiveId))
+      ),
+    ].join("\n");
+  }
+
+  private buildCurrentArchivedSessionReply(conversationKey: string): string {
+    if (!this.sessionRouter.getCurrentArchivedSession) {
+      return "当前会话模式不支持查看当前 session。";
+    }
+
+    const session = this.sessionRouter.getCurrentArchivedSession(conversationKey);
+    if (!session) return "当前没有可查看的 session。";
+
+    return [
+      "当前 session：",
+      `Archive：${session.archiveId}`,
+      `原生 session：${session.sessionId}`,
+      `模型：${session.model}`,
+      `工作目录：${session.cwd}`,
+      `消息：${session.messageCount}`,
+      `最近：${session.preview || "-"}`,
+      `更新时间：${formatArchivedSessionTime(session.lastActiveAt)}`,
+    ].join("\n");
+  }
+
+  private buildArchivedSessionHistoryReply(conversationKey: string, selection: number): string {
+    if (!this.sessionRouter.getArchivedSessionDetail) {
+      return "当前会话模式不支持查看历史 session 记录。";
+    }
+
+    const detail = this.sessionRouter.getArchivedSessionDetail(conversationKey, selection);
+    if (!detail) return `没有找到第 ${selection} 个 session。`;
+
+    const marker = detail.session.current ? "当前" : "历史";
+    const historyLines = detail.messages.map(formatArchivedHistoryMessage);
+    return [
+      `Session ${selection} · ${marker} · ${detail.session.messageCount} 条消息`,
+      `Archive：${detail.session.archiveId}`,
+      `原生 session：${detail.session.sessionId}`,
+      `更新时间：${formatArchivedSessionTime(detail.session.lastActiveAt)}`,
+      "",
+      ...historyLines,
+    ]
+      .filter((line, index) => index < 4 || line !== "")
+      .join("\n");
   }
 
   private async replyCommand(text: string, replyToMessageId: string | undefined): Promise<void> {
@@ -683,17 +832,94 @@ type FeishuCommand =
   | { type: "clear" }
   | { type: "stop" }
   | { type: "status" }
+  | { type: "sessions"; listCount?: FeishuSessionCount; summaryCount?: FeishuSessionCount }
+  | { type: "session"; selection?: number }
+  | { type: "resume"; selection: number }
+  | { type: "fork"; selection: number }
   | { type: "file"; path: string };
 
+type FeishuSessionCount = number | "all";
+type ArchivedSessionCommand = Extract<
+  FeishuCommand,
+  { type: "sessions" | "session" | "resume" | "fork" }
+>;
+
+function isArchivedSessionCommand(command: FeishuCommand): command is ArchivedSessionCommand {
+  return (
+    command.type === "sessions" ||
+    command.type === "session" ||
+    command.type === "resume" ||
+    command.type === "fork"
+  );
+}
+
 function parseFeishuCommand(text: string): FeishuCommand | null {
-  const command = text.trim().toLowerCase();
+  const trimmed = text.trim();
+  const command = trimmed.toLowerCase();
   if (command === "/new") return { type: "new" };
   if (command === "/clear") return { type: "clear" };
   if (command === "/stop") return { type: "stop" };
   if (command === "/status") return { type: "status" };
+  const sessions = parseFeishuSessionsCommand(trimmed);
+  if (sessions) return sessions;
+  if (command === "/session") return { type: "session" };
+  const session = trimmed.match(/^\/session\s+(\d+)$/i);
+  if (session) return { type: "session", selection: Number(session[1]) };
+  const resume = trimmed.match(/^\/resume\s+(\d+)$/i);
+  if (resume) return { type: "resume", selection: Number(resume[1]) };
+  const fork = trimmed.match(/^\/fork\s+(\d+)$/i);
+  if (fork) return { type: "fork", selection: Number(fork[1]) };
   const file = text.trim().match(/^\/(?:file|sendfile)\s+(.+)$/i);
   if (file) return { type: "file", path: file[1].trim() };
   return null;
+}
+
+function parseFeishuSessionsCommand(text: string): FeishuCommand | null {
+  const tokens = text.trim().split(/\s+/);
+  if (tokens[0]?.toLowerCase() !== "/sessions") return null;
+  let listCount: FeishuSessionCount | undefined;
+  let summaryCount: FeishuSessionCount | undefined;
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.toLowerCase() === "--summary") {
+      const nextCount = parseFeishuSessionCount(tokens[index + 1]);
+      if (nextCount !== null) {
+        summaryCount = nextCount;
+        index += 1;
+      } else {
+        summaryCount = 10;
+      }
+      continue;
+    }
+
+    const parsedCount = parseFeishuSessionCount(token);
+    if (parsedCount === null || listCount !== undefined) return null;
+    listCount = parsedCount;
+  }
+
+  if (summaryCount !== undefined) {
+    listCount =
+      listCount === undefined ? summaryCount : maxFeishuSessionCount(listCount, summaryCount);
+  }
+
+  return { type: "sessions", listCount, summaryCount };
+}
+
+function parseFeishuSessionCount(token: string | undefined): FeishuSessionCount | null {
+  if (!token) return null;
+  if (token.toLowerCase() === "all") return "all";
+  if (!/^\d+$/.test(token)) return null;
+  const count = Number(token);
+  return count > 0 ? count : null;
+}
+
+function maxFeishuSessionCount(
+  listCount: FeishuSessionCount,
+  summaryCount: FeishuSessionCount
+): FeishuSessionCount {
+  if (listCount === "all" || summaryCount === "all") return "all";
+  return Math.max(listCount, summaryCount);
 }
 
 function buildFeishuMessagePreview(text: string, imageCount: number, fileCount = 0): string {
@@ -714,6 +940,83 @@ function noopEventClient(): FeishuEventClient {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function limitFeishuSessionList<T>(sessions: T[], count: FeishuSessionCount | undefined): T[] {
+  if (count === undefined || count === "all") return sessions;
+  return sessions.slice(0, count);
+}
+
+function formatArchivedSessionLine(
+  session: FeishuSessionSummary,
+  index: number,
+  aiSummary?: FeishuSessionAiSummary
+): string {
+  const marker = session.current ? "当前" : "历史";
+  const resumable = session.nativeSessionStarted ? "" : " · 不可直接 resume";
+  const forkedFrom = session.forkedFrom ? ` · fork 自 ${session.forkedFrom}` : "";
+  if (session.messageCount === 0) {
+    return `${index + 1}. ${marker} · ${formatArchivedSessionTime(session.lastActiveAt)} · 0 条消息 · 空会话${forkedFrom}`;
+  }
+  if (aiSummary) {
+    return [
+      `${index + 1}. ${marker} · ${formatArchivedSessionTime(session.lastActiveAt)} · ${session.messageCount} 条消息${resumable}${forkedFrom}`,
+      `   主题：${aiSummary.topic}`,
+      `   关键信息：${aiSummary.keyInfo}`,
+      `   最近动作：${aiSummary.recentAction}`,
+    ].join("\n");
+  }
+
+  return [
+    `${index + 1}. ${marker} · ${formatArchivedSessionTime(session.lastActiveAt)} · ${session.messageCount} 条消息${resumable}${forkedFrom}`,
+    `   ${session.preview || session.archiveId}`,
+  ].join("\n");
+}
+
+function formatArchivedHistoryMessage(message: {
+  role: "user" | "assistant";
+  text: string;
+}): string {
+  const role = message.role === "user" ? "用户" : "模型";
+  return `${role}：\n${truncateArchivedHistoryText(message.text)}`;
+}
+
+function truncateArchivedHistoryText(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}\n...` : trimmed;
+}
+
+function formatArchivedSessionSwitchReply(
+  result: FeishuArchivedSessionSwitchResult | undefined,
+  action: "resume" | "fork"
+): string {
+  if (!result) {
+    return action === "resume"
+      ? "当前会话模式不支持恢复历史 session。"
+      : "当前会话模式不支持 fork 历史 session。";
+  }
+  if (!result.ok) return result.message;
+
+  return [
+    result.message,
+    result.archiveId ? `Archive：${result.archiveId}` : "",
+    result.sessionId ? `原生 session：${result.sessionId}` : "",
+    result.forkedFrom ? `fork 自：${result.forkedFrom}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatArchivedSessionTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function formatFeishuProgressEvent(event: FeishuHeadlessProgressEvent): string {

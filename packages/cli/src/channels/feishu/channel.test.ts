@@ -857,6 +857,361 @@ describe("FeishuChannel", () => {
     expect(replies[0]).toContain("运行中");
   });
 
+  test("slash sessions lists archived sessions without routing to the model", async () => {
+    const routed: string[] = [];
+    const replies: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send(_conversationKey, text) {
+          routed.push(text);
+        },
+        listSessions: () => [],
+        listArchivedSessions: () => [
+          {
+            archiveId: "session-22222222-2222-4222-8222-222222222222",
+            conversationKey: "group:oc_group",
+            sessionId: "22222222-2222-4222-8222-222222222222",
+            cwd,
+            model: "cx@gpt-5.5",
+            nativeSessionStarted: true,
+            createdAt: "2026-06-24T12:00:00.000Z",
+            lastActiveAt: "2026-06-24T12:03:00.000Z",
+            current: true,
+            messageCount: 4,
+            preview: "第二个问题",
+          },
+          {
+            archiveId: "session-11111111-1111-4111-8111-111111111111",
+            conversationKey: "group:oc_group",
+            sessionId: "11111111-1111-4111-8111-111111111111",
+            cwd,
+            model: "cx@gpt-5.5",
+            nativeSessionStarted: true,
+            createdAt: "2026-06-24T11:00:00.000Z",
+            lastActiveAt: "2026-06-24T11:03:00.000Z",
+            current: false,
+            messageCount: 2,
+            preview: "第一个问题",
+          },
+        ],
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /sessions'));
+    await delay(5);
+
+    expect(routed).toEqual([]);
+    expect(replies[0]).toContain("历史 session");
+    expect(replies[0]).toContain("1. 当前");
+    expect(replies[0]).toContain("第二个问题");
+    expect(replies[0]).toContain("2.");
+    expect(replies[0]).toContain("第一个问题");
+  });
+
+  test("slash sessions summary uses independent list and summary counts", async () => {
+    const replies: string[] = [];
+    const events: string[] = [];
+    const archivedSessions = [1, 2, 3].map((index) => ({
+      archiveId: `session-${index}`,
+      conversationKey: "group:oc_group",
+      sessionId: `native-${index}`,
+      cwd,
+      model: "cx@gpt-5.5",
+      nativeSessionStarted: true,
+      createdAt: `2026-06-24T12:0${index}:00.000Z`,
+      lastActiveAt: `2026-06-24T12:0${index}:00.000Z`,
+      current: index === 1,
+      messageCount: index,
+      preview: `问题 ${index}`,
+    }));
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        listArchivedSessions: () => archivedSessions,
+        async summarizeArchivedSessions(_conversationKey, count) {
+          events.push(`summary:${count}`);
+          return archivedSessions.slice(0, Number(count)).map((session) => ({
+            ...session,
+            aiSummary: {
+              topic: `主题 ${session.archiveId}`,
+              keyInfo: "关键信息",
+              recentAction: "最近动作",
+              messageCount: session.messageCount,
+              updatedAt: "2026-06-24T12:10:00.000Z",
+            },
+          }));
+        },
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /sessions 1 --summary 2'));
+    await delay(5);
+
+    expect(events).toEqual(["summary:2"]);
+    expect(replies[0]).toContain("1. 当前");
+    expect(replies[0]).toContain("主题：主题 session-1");
+    expect(replies[0]).not.toContain("状态：");
+    expect(replies[0]).toContain("2. 历史");
+    expect(replies[0]).toContain("主题：主题 session-2");
+    expect(replies[0]).not.toContain("问题 3");
+  });
+
+  test("slash sessions summary treats empty sessions as empty without status", async () => {
+    const replies: string[] = [];
+    const events: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        listArchivedSessions: () => [
+          {
+            archiveId: "session-empty",
+            conversationKey: "group:oc_group",
+            sessionId: "native-empty",
+            cwd,
+            model: "cx@gpt-5.5",
+            nativeSessionStarted: false,
+            createdAt: "2026-06-24T12:01:00.000Z",
+            lastActiveAt: "2026-06-24T12:01:00.000Z",
+            current: true,
+            messageCount: 0,
+            preview: "",
+          },
+        ],
+        async summarizeArchivedSessions(_conversationKey, count) {
+          events.push(`summary:${count}`);
+          return [];
+        },
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /sessions --summary'));
+    await delay(5);
+
+    expect(events).toEqual(["summary:10"]);
+    expect(replies[0]).toContain("0 条消息 · 空会话");
+    expect(replies[0]).not.toContain("状态：");
+    expect(replies[0]).not.toContain("不可直接 resume");
+  });
+
+  test("slash sessions all summary lists all while summarizing selected sessions", async () => {
+    const replies: string[] = [];
+    const events: string[] = [];
+    const archivedSessions = [1, 2, 3].map((index) => ({
+      archiveId: `session-${index}`,
+      conversationKey: "group:oc_group",
+      sessionId: `native-${index}`,
+      cwd,
+      model: "cx@gpt-5.5",
+      nativeSessionStarted: true,
+      createdAt: `2026-06-24T12:0${index}:00.000Z`,
+      lastActiveAt: `2026-06-24T12:0${index}:00.000Z`,
+      current: index === 1,
+      messageCount: index,
+      preview: `问题 ${index}`,
+    }));
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        listArchivedSessions: () => archivedSessions,
+        async summarizeArchivedSessions(_conversationKey, count) {
+          events.push(`summary:${count}`);
+          return [
+            {
+              ...archivedSessions[0],
+              aiSummary: {
+                topic: "最近主题",
+                keyInfo: "关键信息",
+                recentAction: "最近动作",
+                messageCount: 1,
+                updatedAt: "2026-06-24T12:10:00.000Z",
+              },
+            },
+          ];
+        },
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> /sessions all --summary 1')
+    );
+    await delay(5);
+
+    expect(events).toEqual(["summary:1"]);
+    expect(replies[0]).toContain("主题：最近主题");
+    expect(replies[0]).toContain("问题 2");
+    expect(replies[0]).toContain("问题 3");
+  });
+
+  test("slash session replies with the current archived session", async () => {
+    const replies: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        getCurrentArchivedSession: () => ({
+          archiveId: "session-11111111-1111-4111-8111-111111111111",
+          conversationKey: "group:oc_group",
+          sessionId: "11111111-1111-4111-8111-111111111111",
+          cwd,
+          model: "cx@gpt-5.5",
+          nativeSessionStarted: true,
+          createdAt: "2026-06-24T11:00:00.000Z",
+          lastActiveAt: "2026-06-24T11:03:00.000Z",
+          current: true,
+          messageCount: 2,
+          preview: "当前问题",
+        }),
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /session'));
+    await delay(5);
+
+    expect(replies[0]).toContain("当前 session");
+    expect(replies[0]).toContain("session-11111111-1111-4111-8111-111111111111");
+    expect(replies[0]).toContain("当前问题");
+  });
+
+  test("slash session number replies with archived session history", async () => {
+    const replies: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        getArchivedSessionDetail: (_conversationKey, selection) => ({
+          session: {
+            archiveId: "session-22222222-2222-4222-8222-222222222222",
+            conversationKey: "group:oc_group",
+            sessionId: "22222222-2222-4222-8222-222222222222",
+            cwd,
+            model: "cx@gpt-5.5",
+            nativeSessionStarted: true,
+            createdAt: "2026-06-24T12:00:00.000Z",
+            lastActiveAt: "2026-06-24T12:03:00.000Z",
+            current: false,
+            messageCount: 2,
+            preview: "历史问题",
+          },
+          messages: [
+            { role: "user", text: "这个文件是什么" },
+            { role: "assistant", text: "这是一个 Dockerfile。" },
+          ],
+          selection,
+        }),
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /session 2'));
+    await delay(5);
+
+    expect(replies[0]).toContain("Session 2");
+    expect(replies[0]).toContain("用户：\n这个文件是什么");
+    expect(replies[0]).toContain("模型：\n这是一个 Dockerfile。");
+  });
+
+  test("slash resume and fork switch archived sessions without routing to the model", async () => {
+    const events: string[] = [];
+    const replies: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText(input) {
+          replies.push(`${input.messageId}:${input.text}`);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send(_conversationKey, text) {
+          events.push(`send:${text}`);
+        },
+        listSessions: () => [],
+        resumeArchivedSession(conversationKey, selection) {
+          events.push(`resume:${conversationKey}:${selection}`);
+          return {
+            ok: true,
+            message: "已恢复历史 session。",
+            archiveId: "session-11111111-1111-4111-8111-111111111111",
+            sessionId: "11111111-1111-4111-8111-111111111111",
+          };
+        },
+        forkArchivedSession(conversationKey, selection) {
+          events.push(`fork:${conversationKey}:${selection}`);
+          return {
+            ok: true,
+            message: "已 fork 历史 session。",
+            archiveId: "session-22222222-2222-4222-8222-222222222222",
+            sessionId: "22222222-2222-4222-8222-222222222222",
+            forkedFrom: "session-11111111-1111-4111-8111-111111111111",
+          };
+        },
+        stopAll() {},
+      },
+    } as ConstructorParameters<typeof FeishuChannel>[0]);
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /resume 2'));
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> /fork 1', undefined, "om_2")
+    );
+    await delay(5);
+
+    expect(events).toEqual(["resume:group:oc_group:2", "fork:group:oc_group:1"]);
+    expect(replies[0]).toContain("om_1:已恢复历史 session。");
+    expect(replies[0]).toContain("session-11111111-1111-4111-8111-111111111111");
+    expect(replies[1]).toContain("om_2:已 fork 历史 session。");
+    expect(replies[1]).toContain("fork 自");
+  });
+
   test("testConnection delegates to message client and reports disabled accounts", async () => {
     const channel = new FeishuChannel({
       config: configuredConfig({ id: "donghao" }),
