@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "./profile-config.js";
@@ -110,6 +110,21 @@ describe("web config server", () => {
     expect(html).not.toContain('list="provider-options"');
   });
 
+  test("GET / renders channel overview on the config page instead of the Feishu editor", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const configPanel = html.slice(
+      html.indexOf('<section class="panel" id="panel-config">'),
+      html.indexOf('<section class="panel" id="panel-providers">')
+    );
+
+    // 配置页只做全局配置和频道概览，具体账号编辑放到频道页。
+    expect(configPanel).toContain('id="config-channel-summary"');
+    expect(configPanel).toContain('data-i18n="config.channels"');
+    expect(configPanel).not.toContain('id="feishu-config-form"');
+    expect(configPanel).not.toContain('id="feishu-account-list"');
+  });
+
   test("GET / renders provider editor as a wide two-column modal", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -213,6 +228,32 @@ describe("web config server", () => {
     expect(html).not.toContain('className = "copy-command-button">Copy');
   });
 
+  test("GET / renders Feishu session details in a right-side chat drawer", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    expect(html).toContain('id="feishu-session-drawer"');
+    expect(html).toContain("openFeishuSessionDrawer");
+    expect(html).toContain("closeFeishuSessionDrawer");
+    expect(html).toContain("createFeishuSessionChatThread");
+    expect(html).toContain("createFeishuMessageTurn");
+    expect(html).toContain("createFeishuToolCard");
+    expect(html).toContain("createFeishuFileAttachmentButton");
+    expect(html).toContain("openFeishuLocalFile");
+    expect(html).toContain("renderFeishuAssistantText");
+    expect(html).toContain("parseFeishuFencedBlocks");
+    expect(html).toContain("feishu-session-drawer");
+    expect(html).toContain("feishu-chat-thread");
+    expect(html).toContain("feishu-fenced-block");
+    expect(html).toContain("feishu-file-pill");
+    expect(html).toContain("feishu-tool-card");
+    expect(html).toContain("/api/open-local-file");
+    expect(html).toContain("width: 86vw");
+    expect(html).toContain("width: 100vw");
+    expect(html).toContain('"channels.sessionRawLog"');
+    expect(html).not.toContain("createFeishuSessionDetailRow");
+  });
+
   test("GET / renders OAuth provider modal controls", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -269,18 +310,61 @@ describe("web config server", () => {
 
     expect(html).toContain('data-tab="channels"');
     expect(html).toContain('id="panel-channels"');
+    expect(html).toContain('id="channel-list"');
+    expect(html).toContain('id="channel-detail"');
     expect(html).toContain('id="channels-status"');
-    expect(html).toContain('id="channel-feishu-status"');
+    expect(html).toContain('id="channel-feishu-detail"');
     expect(html).toContain("loadChannels");
+    expect(html).toContain("renderChannelList");
     expect(html).toContain("/api/channels");
-    expect(html).toContain('id="channel-feishu-sessions"');
+    expect(html).toContain('id="feishu-config-form"');
+    expect(html).toContain('id="feishu-edit-all"');
+    expect(html).toContain('id="feishu-save-all"');
+    expect(html).toContain('id="feishu-account-add"');
+    expect(html).toContain('id="feishu-account-list"');
+    expect(html).toContain("renderFeishuAccountSections");
+    expect(html).toContain("setFeishuAccountEditing");
+    expect(html).toContain("saveFeishuAccount");
+    expect(html).toContain("feishu-account-sessions");
+    expect(html).toContain('id="feishu-session-drawer"');
     expect(html).toContain("renderFeishuSessions");
-    expect(html).toContain("toggleFeishuSessionDetails");
+    expect(html).toContain("openFeishuSessionDrawer");
     expect(html).toContain("channel-session-detail-button");
     expect(html).toContain('"channels.sessionMonitor"');
     expect(html).toContain('"channels.sessionDetails"');
     expect(html).toContain('id="terminal-start"');
     expect(html).toContain('id="terminal"');
+  });
+
+  test("GET / renders Feishu app secret reveal controls", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    expect(html).toContain("createFeishuSecretInput");
+    expect(html).toContain("toggleFeishuSecretVisibility");
+    expect(html).toContain("feishu-secret-toggle");
+    expect(html).toContain("/api/feishu-config/");
+    expect(html).toContain("/secret");
+    expect(html).toContain('"feishuConfig.showSecret"');
+    expect(html).toContain('"feishuConfig.hideSecret"');
+  });
+
+  test("GET / renders mutually exclusive Feishu edit and save controls", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    expect(html).toContain('id="feishu-cancel-all"');
+    expect(html).toContain(
+      'id="feishu-save-all" type="button" data-i18n="feishuConfig.saveAll" hidden'
+    );
+    expect(html).toContain('id="feishu-cancel-all" type="button" data-i18n="common.cancel" hidden');
+    expect(html).toContain("updateFeishuBulkActions");
+    expect(html).toContain("cancelFeishuAccountEdit");
+    expect(html).toContain("cancelFeishuAllEdits");
+    expect(html).toContain("if (isEditing) {");
+    expect(html).toContain("actions.append(cancel, save, remove)");
+    expect(html).toContain("actions.append(edit, remove)");
+    expect(html).not.toContain("actions.append(edit, save, remove)");
   });
 
   test("GET / renders terminal restart behavior for model changes", async () => {
@@ -516,6 +600,61 @@ describe("web config server", () => {
     });
   });
 
+  test("POST /api/open-local-file opens a saved Feishu file under channel cwd", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "claudish-open-file-"));
+    const filePath = join(cwd, "feishu-files", "om_1-file_1-Dockerfile.bge");
+    mkdirSync(join(cwd, "feishu-files"), { recursive: true });
+    writeFileSync(filePath, "FROM python:3.11");
+    let openedPath = "";
+
+    const response = await handleConfigWebRequest(
+      request("/api/open-local-file", {
+        method: "POST",
+        body: JSON.stringify({ path: filePath }),
+      }),
+      {
+        channelStatusProvider: () => ({
+          channels: [{ id: "feishu:wudonghao", status: "connected", cwd }],
+        }),
+        localFileOpener: (path) => {
+          openedPath = path;
+        },
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(openedPath).toBe(filePath);
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  test("POST /api/open-local-file rejects paths outside Feishu file cache", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "claudish-open-file-"));
+    const outsidePath = join(cwd, "other.txt");
+    writeFileSync(outsidePath, "nope");
+    let opened = false;
+
+    const response = await handleConfigWebRequest(
+      request("/api/open-local-file", {
+        method: "POST",
+        body: JSON.stringify({ path: outsidePath }),
+      }),
+      {
+        channelStatusProvider: () => ({
+          channels: [{ id: "feishu:wudonghao", status: "connected", cwd }],
+        }),
+        localFileOpener: () => {
+          opened = true;
+        },
+      }
+    );
+
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toContain("Feishu file");
+    expect(opened).toBe(false);
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
   test("GET /api/config includes model options from defaults and custom providers", async () => {
     // The browser model picker needs server-provided options without making
     // external catalog requests during page load.
@@ -545,6 +684,194 @@ describe("web config server", () => {
     expect(body.modelOptionsByProvider.cx).toBeUndefined();
     expect(body.modelOptionsByProvider["corp-openai"]).toEqual(["gpt-4o", "gpt-4.1"]);
     expect(body.customProviders[0].models).toEqual(["gpt-4o", "gpt-4.1"]);
+  });
+
+  test("GET /api/feishu-config returns masked Feishu accounts from config.yaml", async () => {
+    const configPath = join(process.env.CLAUDISH_HOME!, "config.yaml");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: donghao",
+        "        enabled: true",
+        "        appId: cli_donghao",
+        "        appSecret: secret_donghao",
+        "        botOpenId: ou_donghao",
+        "        domain: lark",
+        "        model: cx@gpt-5.5",
+        "        cwd: ~/.claudish/workspace/donghao",
+        "        sessionMode: headless",
+        "        sendProgressReplies: true",
+      ].join("\n")
+    );
+
+    const response = await handleConfigWebRequest(request("/api/feishu-config"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.accounts).toEqual([
+      {
+        id: "donghao",
+        enabled: true,
+        appId: "cli_donghao",
+        appSecret: "",
+        hasAppSecret: true,
+        botOpenId: "ou_donghao",
+        domain: "lark",
+        sendProgressReplies: true,
+        model: "cx@gpt-5.5",
+        cwd: "~/.claudish/workspace/donghao",
+        sessionMode: "headless",
+      },
+    ]);
+  });
+
+  test("GET /api/feishu-config/:id/secret returns one saved Feishu secret", async () => {
+    const configPath = join(process.env.CLAUDISH_HOME!, "config.yaml");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: donghao",
+        "        enabled: true",
+        "        appId: cli_donghao",
+        "        appSecret: secret_donghao",
+        "      - id: team",
+        "        enabled: true",
+        "        appId: cli_team",
+        "        appSecret: secret_team",
+      ].join("\n")
+    );
+
+    const response = await handleConfigWebRequest(request("/api/feishu-config/donghao/secret"));
+    const missing = await handleConfigWebRequest(request("/api/feishu-config/missing/secret"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ appSecret: "secret_donghao" });
+    expect(missing.status).toBe(404);
+  });
+
+  test("POST /api/feishu-config saves accounts and preserves blank existing secrets", async () => {
+    const configPath = join(process.env.CLAUDISH_HOME!, "config.yaml");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      configPath,
+      [
+        "# 这个注释属于 service，保存飞书账号时必须保留。",
+        "service:",
+        "  port: 17888",
+        "# 这个注释属于其他配置，也必须保留。",
+        "customSection:",
+        "  note: keep-me",
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: donghao",
+        "        enabled: true",
+        "        appId: cli_old",
+        "        appSecret: secret_old",
+        "        botOpenId: ou_old",
+        "        domain: feishu",
+        "        model: cx@gpt-5.5",
+        "        cwd: ~/.claudish/workspace/donghao",
+        "        sessionMode: headless",
+        "        sendProgressReplies: false",
+      ].join("\n")
+    );
+
+    const response = await handleConfigWebRequest(
+      request("/api/feishu-config", {
+        method: "POST",
+        body: JSON.stringify({
+          accounts: [
+            {
+              id: "donghao",
+              enabled: false,
+              appId: "cli_new",
+              appSecret: "",
+              botOpenId: "ou_new",
+              domain: "lark",
+              sendProgressReplies: true,
+            },
+            {
+              id: "team",
+              enabled: true,
+              appId: "cli_team",
+              appSecret: "secret_team",
+              botOpenId: "ou_team",
+              domain: "feishu",
+              sendProgressReplies: false,
+            },
+          ],
+        }),
+      })
+    );
+    const body = await response.json();
+    const yaml = readFileSync(configPath, "utf-8");
+
+    expect(response.status).toBe(200);
+    expect(body.accounts.map((account: { id: string }) => account.id)).toEqual(["donghao", "team"]);
+    expect(yaml).toContain("port: 17888");
+    expect(yaml).toContain("# 这个注释属于 service，保存飞书账号时必须保留。");
+    expect(yaml).toContain("# 这个注释属于其他配置，也必须保留。");
+    expect(yaml).toContain("customSection:");
+    expect(yaml).toContain("note: keep-me");
+    expect(yaml).toContain("id: donghao");
+    expect(yaml).toContain("enabled: false");
+    expect(yaml).toContain("appId: cli_new");
+    expect(yaml).toContain("appSecret: secret_old");
+    expect(yaml).toContain("domain: lark");
+    expect(yaml).toContain("sendProgressReplies: true");
+    expect(yaml).toContain("id: team");
+    expect(yaml).toContain("appSecret: secret_team");
+  });
+
+  test("POST /api/feishu-config converts legacy single-account config to accounts", async () => {
+    const configPath = join(process.env.CLAUDISH_HOME!, "config.yaml");
+    mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    enabled: true",
+        "    appId: cli_legacy",
+        "    appSecret: secret_legacy",
+        "    botOpenId: ou_legacy",
+      ].join("\n")
+    );
+
+    const response = await handleConfigWebRequest(
+      request("/api/feishu-config", {
+        method: "POST",
+        body: JSON.stringify({
+          accounts: [
+            {
+              id: "default",
+              enabled: true,
+              appId: "cli_legacy_new",
+              appSecret: "",
+              botOpenId: "ou_legacy_new",
+              domain: "feishu",
+              sendProgressReplies: false,
+            },
+          ],
+        }),
+      })
+    );
+    const yaml = readFileSync(configPath, "utf-8");
+
+    expect(response.status).toBe(200);
+    expect(yaml).toContain("accounts:");
+    expect(yaml).toContain("id: default");
+    expect(yaml).toContain("appSecret: secret_legacy");
+    expect(yaml).not.toContain("    appId: cli_legacy_new\n    appSecret");
   });
 
   test("GET /api/config includes configured builtin providers", async () => {
@@ -858,7 +1185,7 @@ describe("web config server", () => {
           model: "openrouter@anthropic/claude-sonnet-4",
           messages: [{ role: "user", content: "hello" }],
         }),
-      }),
+      })
     );
     const body = await response.json();
 

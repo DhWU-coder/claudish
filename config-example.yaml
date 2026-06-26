@@ -1,6 +1,7 @@
 # Claudish 后台服务与 Channels 示例配置
 # 实际使用时放到 ~/.claudish/config.yaml
-# 注意：当前 config.yaml 不支持自动热更新；改完后需要运行 claudish restart 才会重新加载。
+# 注意：飞书账号增删、enabled、appId/appSecret/botOpenId/domain、sendProgressReplies 支持热更新。
+# model、cwd、sessionMode、history、service 相关字段改完后需要运行 claudish restart 生效。
 
 service:
   # Web 监控界面的优先端口；如果被占用，claudish start 会提示 warning 并自动换到下一个可用端口。
@@ -36,6 +37,8 @@ channels:
         # headless：飞书专用非 TUI 模式，只把正式正文回复到飞书，推荐使用。
         # terminal：旧的 PTY/TUI 模式，会模拟终端会话，主要用于兼容或排查问题。
         sessionMode: headless
+        # 是否把模型运行过程中的中间正文回复到飞书；不写时默认 false，只在 Web 监控里展示。
+        sendProgressReplies: false
         history:
           # true 表示保存每个群/私聊的 session.json 和 messages.jsonl，后台重启后仍可恢复历史。
           persist: true
@@ -63,6 +66,8 @@ channels:
         # cwd: ~/.claudish/workspace/team
         # 推荐保持 headless；只有需要旧终端模式时再改 terminal。
         sessionMode: headless
+        # 是否把模型运行过程中的中间正文回复到飞书；不写时默认 false。
+        sendProgressReplies: false
         history:
           # 是否持久化这个账号下每个会话的历史。
           persist: true
@@ -82,6 +87,7 @@ channels:
     # model: cx@gpt-5.5
     # cwd: ~/.claudish/workspace
     # sessionMode: headless
+    # sendProgressReplies: false
     # history:
     #   persist: true
     #   maxMessages: 50

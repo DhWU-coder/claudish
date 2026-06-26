@@ -11,7 +11,7 @@ import {
   FeishuHistoryStore,
   type FeishuSessionMetadata,
 } from "./history.js";
-import type { FeishuRoutedSessionStatus } from "./session-router.js";
+import type { FeishuRoutedSessionStatus, FeishuSessionSendContext } from "./session-router.js";
 
 export interface FeishuHeadlessSessionRouterOptions {
   model: string;
@@ -20,8 +20,16 @@ export interface FeishuHeadlessSessionRouterOptions {
   historyBaseDir?: string;
   createSessionId?: () => string;
   runHeadless?: FeishuHeadlessRunner;
-  onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
-  onProgress?: (conversationKey: string, event: FeishuHeadlessProgressEvent) => void;
+  onOutput?: (
+    conversationKey: string,
+    data: string | Uint8Array,
+    context: FeishuSessionSendContext | undefined
+  ) => void;
+  onProgress?: (
+    conversationKey: string,
+    event: FeishuHeadlessProgressEvent,
+    context: FeishuSessionSendContext | undefined
+  ) => void;
 }
 
 interface RoutedHeadlessSession {
@@ -38,10 +46,15 @@ export class FeishuHeadlessSessionRouter {
   private readonly historyStore: FeishuHistoryStore;
   private readonly createSessionId: () => string;
   private readonly runHeadless: FeishuHeadlessRunner;
-  private readonly onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
+  private readonly onOutput?: (
+    conversationKey: string,
+    data: string | Uint8Array,
+    context: FeishuSessionSendContext | undefined
+  ) => void;
   private readonly onProgress?: (
     conversationKey: string,
-    event: FeishuHeadlessProgressEvent
+    event: FeishuHeadlessProgressEvent,
+    context: FeishuSessionSendContext | undefined
   ) => void;
   private readonly sessions = new Map<string, RoutedHeadlessSession>();
 
@@ -59,11 +72,15 @@ export class FeishuHeadlessSessionRouter {
     this.onProgress = options.onProgress;
   }
 
-  async send(conversationKey: string, text: string): Promise<void> {
+  async send(
+    conversationKey: string,
+    text: string,
+    context?: FeishuSessionSendContext
+  ): Promise<void> {
     const routed = this.getOrCreateSession(conversationKey);
     routed.queue = routed.queue
       .catch(() => undefined)
-      .then(() => this.runQueuedMessage(routed, text));
+      .then(() => this.runQueuedMessage(routed, text, context));
     return routed.queue;
   }
 
@@ -132,7 +149,11 @@ export class FeishuHeadlessSessionRouter {
     return routed;
   }
 
-  private async runQueuedMessage(routed: RoutedHeadlessSession, text: string): Promise<void> {
+  private async runQueuedMessage(
+    routed: RoutedHeadlessSession,
+    text: string,
+    context?: FeishuSessionSendContext
+  ): Promise<void> {
     const abortController = new AbortController();
     routed.abortController = abortController;
     this.appendMessage(routed.metadata, { role: "user", text });
@@ -142,14 +163,15 @@ export class FeishuHeadlessSessionRouter {
     try {
       resultText = await this.runNativeSession(
         routed.metadata,
-        text,
+        buildReturnFileInstructionPrompt(routed.metadata, text, resume),
         resume,
-        abortController.signal
+        abortController.signal,
+        context
       );
     } catch (error) {
       if (abortController.signal.aborted) return;
       if (!resume || !this.history.persist) throw error;
-      resultText = await this.runWithJsonlFallback(routed, text, abortController.signal);
+      resultText = await this.runWithJsonlFallback(routed, text, abortController.signal, context);
     }
     resultText = sanitizeFeishuAssistantText(resultText);
 
@@ -160,7 +182,7 @@ export class FeishuHeadlessSessionRouter {
     this.writeSession(routed.metadata);
     this.appendMessage(routed.metadata, { role: "assistant", text: resultText });
     if (resultText) {
-      this.onOutput?.(routed.conversationKey, resultText);
+      this.onOutput?.(routed.conversationKey, resultText, context);
     }
   }
 
@@ -168,16 +190,20 @@ export class FeishuHeadlessSessionRouter {
     metadata: FeishuSessionMetadata,
     prompt: string,
     resume: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    context?: FeishuSessionSendContext
   ): Promise<string> {
-    const result = await this.runHeadless(this.buildRunInput(metadata, prompt, resume, signal));
+    const result = await this.runHeadless(
+      this.buildRunInput(metadata, prompt, resume, signal, context)
+    );
     return result.text;
   }
 
   private async runWithJsonlFallback(
     routed: RoutedHeadlessSession,
     latestText: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    context?: FeishuSessionSendContext
   ): Promise<string> {
     const previousMessages = this.historyStore.readRecentMessages(
       routed.metadata,
@@ -192,7 +218,8 @@ export class FeishuHeadlessSessionRouter {
         routed.metadata,
         buildFallbackPrompt(previousMessages, latestText),
         false,
-        signal
+        signal,
+        context
       )
     );
     return result.text;
@@ -202,7 +229,8 @@ export class FeishuHeadlessSessionRouter {
     metadata: FeishuSessionMetadata,
     prompt: string,
     resume: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    context?: FeishuSessionSendContext
   ): FeishuHeadlessRunInput {
     return {
       model: this.model,
@@ -212,7 +240,7 @@ export class FeishuHeadlessSessionRouter {
       resume,
       nativeResume: this.history.nativeResume,
       signal,
-      onProgress: (event) => this.onProgress?.(metadata.conversationKey, event),
+      onProgress: (event) => this.onProgress?.(metadata.conversationKey, event, context),
     };
   }
 
@@ -253,6 +281,25 @@ function buildFallbackPrompt(messages: FeishuHistoryMessage[], latestText: strin
     .filter(Boolean)
     .join("\n\n");
 }
+
+function buildReturnFileInstructionPrompt(
+  metadata: FeishuSessionMetadata,
+  prompt: string,
+  resume: boolean
+): string {
+  if (resume || metadata.nativeSessionStarted) return prompt;
+  return `${RETURN_FILE_INSTRUCTIONS}\n\n${prompt}`;
+}
+
+const RETURN_FILE_INSTRUCTIONS = [
+  "如果你需要把本地文件回传给用户，请先确保文件在当前工作目录内，然后在最终回复中单独输出一行：",
+  "[[claudish:file:相对路径或绝对路径]]",
+  "",
+  "示例：",
+  "[[claudish:file:output/report.pdf]]",
+  "",
+  "这行不会展示给用户，系统会解析并发送对应文件。",
+].join("\n");
 
 function sanitizeFeishuAssistantText(text: string): string {
   const trimmed = text.trim();

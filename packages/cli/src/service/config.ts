@@ -49,6 +49,7 @@ interface RawFeishuConfig {
   model?: unknown;
   cwd?: unknown;
   sessionMode?: unknown;
+  sendProgressReplies?: unknown;
   history?: {
     persist?: unknown;
     maxMessages?: unknown;
@@ -127,6 +128,8 @@ function normalizeRawFeishuConfig(raw: RawFeishuConfig): FeishuConfigFileInput {
     model: readString(raw.model),
     cwd: expandHomePath(readString(raw.cwd)),
     sessionMode: readString(raw.sessionMode),
+    sendProgressReplies:
+      typeof raw.sendProgressReplies === "boolean" ? raw.sendProgressReplies : undefined,
     history: normalizeRawFeishuHistory(raw.history),
   };
 }

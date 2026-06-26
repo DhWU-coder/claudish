@@ -23,6 +23,7 @@ export interface FeishuConfigFileInput {
   model?: string;
   cwd?: string;
   sessionMode?: string;
+  sendProgressReplies?: boolean;
   history?: Partial<FeishuHistoryConfig>;
 }
 
@@ -37,6 +38,7 @@ export interface FeishuConfig {
   model: string;
   cwd: string;
   sessionMode: FeishuSessionMode;
+  sendProgressReplies: boolean;
   history: FeishuHistoryConfig;
 }
 
@@ -56,6 +58,7 @@ export function loadFeishuConfig(
   const model = trimConfig(config.model) || trimEnv(env.CLAUDISH_FEISHU_MODEL) || defaults.model;
   const cwd = trimConfig(config.cwd) || trimEnv(env.CLAUDISH_FEISHU_CWD) || defaults.cwd;
   const sessionMode = normalizeSessionMode(trimConfig(config.sessionMode));
+  const sendProgressReplies = config.sendProgressReplies === true;
   const history = normalizeHistoryConfig(config.history);
   const hasCredentials = Boolean(appId && appSecret);
   const enabled = config.enabled === false ? false : hasCredentials;
@@ -71,6 +74,7 @@ export function loadFeishuConfig(
     model,
     cwd,
     sessionMode,
+    sendProgressReplies,
     history,
   };
 }

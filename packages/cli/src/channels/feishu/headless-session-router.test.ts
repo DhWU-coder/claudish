@@ -54,6 +54,37 @@ describe("FeishuHeadlessSessionRouter", () => {
     expect(lines.map((line) => line.role)).toEqual(["user", "assistant", "user", "assistant"]);
   });
 
+  test("injects return-file instructions only on the first native prompt of a session", async () => {
+    const calls: FeishuHeadlessRunInput[] = [];
+    const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+    const router = new FeishuHeadlessSessionRouter({
+      model: "cx@gpt-5.5",
+      cwd: "/tmp/project",
+      historyBaseDir: dir,
+      history: {
+        persist: true,
+        maxMessages: 50,
+        nativeResume: true,
+      },
+      createSessionId: () => ids.shift()!,
+      runHeadless: async (input) => {
+        calls.push(input);
+        return { text: `answer ${calls.length}` };
+      },
+    });
+
+    await router.send("dm:ou_1", "first");
+    await router.send("dm:ou_1", "second");
+    router.resetSession("dm:ou_1");
+    await router.send("dm:ou_1", "third");
+
+    expect(calls[0].prompt).toContain("[[claudish:file:");
+    expect(calls[0].prompt).toContain("first");
+    expect(calls[1].prompt).toBe("second");
+    expect(calls[2].prompt).toContain("[[claudish:file:");
+    expect(calls[2].prompt).toContain("third");
+  });
+
   test("forwards progress events separately from final replies", async () => {
     const outputs: string[] = [];
     const progress: string[] = [];
@@ -83,6 +114,35 @@ describe("FeishuHeadlessSessionRouter", () => {
 
     expect(progress).toEqual(["tool_start:Read"]);
     expect(outputs).toEqual(["最终回复"]);
+  });
+
+  test("forwards send context to progress events and final replies", async () => {
+    const events: string[] = [];
+    const router = new FeishuHeadlessSessionRouter({
+      model: "cx@gpt-5.5",
+      cwd: "/tmp/project",
+      historyBaseDir: dir,
+      history: {
+        persist: true,
+        maxMessages: 50,
+        nativeResume: true,
+      },
+      createSessionId: () => "11111111-1111-4111-8111-111111111111",
+      runHeadless: async (input) => {
+        input.onProgress?.({ type: "assistant_text", text: "处理中" });
+        return { text: "最终回复" };
+      },
+      onProgress: (_conversationKey, _event, context) => {
+        events.push(`progress:${context?.replyToMessageId}`);
+      },
+      onOutput: (_conversationKey, _data, context) => {
+        events.push(`output:${context?.replyToMessageId}`);
+      },
+    });
+
+    await router.send("group:oc_1", "[Alice] hello", { replyToMessageId: "om_1" });
+
+    expect(events).toEqual(["progress:om_1", "output:om_1"]);
   });
 
   test("falls back to jsonl history when native resume fails", async () => {

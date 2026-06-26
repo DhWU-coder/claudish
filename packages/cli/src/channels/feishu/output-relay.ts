@@ -1,5 +1,6 @@
 export interface FeishuOutputRelayOptions {
   sendText: (text: string) => Promise<void>;
+  transformText?: (text: string) => string;
   onError?: (error: unknown) => void;
   quietMs?: number;
   maxChunkLength?: number;
@@ -7,6 +8,7 @@ export interface FeishuOutputRelayOptions {
 
 export class FeishuOutputRelay {
   private readonly sendText: (text: string) => Promise<void>;
+  private readonly transformText: (text: string) => string;
   private readonly onError?: (error: unknown) => void;
   private readonly quietMs: number;
   private readonly maxChunkLength: number;
@@ -17,6 +19,7 @@ export class FeishuOutputRelay {
 
   constructor(options: FeishuOutputRelayOptions) {
     this.sendText = options.sendText;
+    this.transformText = options.transformText ?? ((text) => text);
     this.onError = options.onError;
     this.quietMs = options.quietMs ?? 800;
     this.maxChunkLength = options.maxChunkLength ?? 3500;
@@ -36,12 +39,13 @@ export class FeishuOutputRelay {
       typeof data === "string" ? data : Buffer.from(data).toString("utf-8"),
       this.suppressedEchoes
     );
-    if (!text) return "";
+    const visibleText = this.transformText(text);
+    if (!visibleText) return "";
 
-    this.pending += text;
-    this.scrollback += text;
+    this.pending += visibleText;
+    this.scrollback += visibleText;
     this.scheduleFlush();
-    return text;
+    return visibleText;
   }
 
   getScrollback(): string {

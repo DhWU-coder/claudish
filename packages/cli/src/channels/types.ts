@@ -11,6 +11,7 @@ export interface Channel {
   id: string;
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
+  updateConfig?(config: unknown): Promise<void> | void;
   getStatus(): ChannelStatus;
 }
 

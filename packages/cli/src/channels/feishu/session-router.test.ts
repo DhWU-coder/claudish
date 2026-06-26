@@ -120,6 +120,26 @@ describe("FeishuSessionRouter", () => {
     expect(outputs).toEqual(["normal answer"]);
   });
 
+  test("forwards send context with normal session output", async () => {
+    const writes: string[] = [];
+    const outputs: string[] = [];
+    const factory = createFakeSessionFactory(writes);
+    const router = new FeishuSessionRouter({
+      createSession: factory.createSession,
+      model: "cx@gpt-5.5",
+      cwd: "/tmp/project",
+      onOutput: (_conversationKey, data, context) => {
+        const text = typeof data === "string" ? data : Buffer.from(data).toString("utf-8");
+        outputs.push(`${context?.replyToMessageId}:${text}`);
+      },
+    });
+
+    await router.send("dm:ou_a", "hello", { replyToMessageId: "om_1" });
+    factory.options[0].onData("normal answer");
+
+    expect(outputs).toEqual(["om_1:normal answer"]);
+  });
+
   test("reuses one session for a group conversation", async () => {
     const writes: string[] = [];
     const factory = createFakeSessionFactory(writes);

@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readServiceState } from "./state.js";
 import { startServiceDaemon } from "./daemon.js";
+import { readServiceState } from "./state.js";
 
 let home: string;
 const originalHome = process.env.CLAUDISH_HOME;
@@ -131,5 +131,73 @@ describe("service daemon", () => {
     expect(terminalWorkingDirectory).toBe(join(home, "workspace"));
     expect(channelCwd).toBe(join(home, "workspace"));
     expect(existsSync(join(home, "workspace"))).toBe(true);
+  });
+
+  test("hot reloads channel config when config.yaml changes", async () => {
+    const configPath = join(home, "config.yaml");
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: first",
+        "        appId: cli_first",
+        "        appSecret: secret_first",
+      ].join("\n")
+    );
+    const channelEvents: string[] = [];
+    let triggerReload: (() => Promise<void> | void) | undefined;
+
+    const daemon = await startServiceDaemon({
+      configPath,
+      startWebServer: () => ({
+        port: 17888,
+        stop() {},
+      }),
+      createConfigWatcher: (options) => {
+        triggerReload = options.onChange;
+        return {
+          close() {
+            channelEvents.push("watch-close");
+          },
+        };
+      },
+      createChannelManager: () => ({
+        async start() {
+          channelEvents.push("channel-start");
+        },
+        async stop() {
+          channelEvents.push("channel-stop");
+        },
+        async reloadConfig(config) {
+          channelEvents.push(`reload:${config.channels.feishuAccounts[0]?.id}`);
+        },
+        getStatus() {
+          return { channels: [{ id: "feishu:first", status: "connected", activeSessions: 0 }] };
+        },
+      }),
+    });
+
+    writeFileSync(
+      configPath,
+      [
+        "channels:",
+        "  feishu:",
+        "    accounts:",
+        "      - id: second",
+        "        appId: cli_second",
+        "        appSecret: secret_second",
+      ].join("\n")
+    );
+    await triggerReload?.();
+    await daemon.stop();
+
+    expect(channelEvents).toEqual([
+      "channel-start",
+      "reload:second",
+      "watch-close",
+      "channel-stop",
+    ]);
   });
 });

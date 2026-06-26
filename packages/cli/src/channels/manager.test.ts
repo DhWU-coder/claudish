@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { FeishuConfig } from "./feishu/config.js";
 import { ChannelManager } from "./manager.js";
 import type { Channel } from "./types.js";
-import type { FeishuConfig } from "./feishu/config.js";
 
-function fakeChannel(id: string, events: string[]): Channel {
+function fakeChannel(id: string, events: string[], updates: unknown[] = []): Channel {
   return {
     id,
     async start() {
@@ -13,6 +13,9 @@ function fakeChannel(id: string, events: string[]): Channel {
     },
     async stop() {
       events.push(`${id}:stop`);
+    },
+    updateConfig(config: unknown) {
+      updates.push(config);
     },
     getStatus() {
       return { id, status: "connected", activeSessions: 1 };
@@ -165,4 +168,107 @@ describe("ChannelManager", () => {
       "feishu:team",
     ]);
   });
+
+  test("hot reloads Feishu accounts by adding, removing, and restarting changed apps", async () => {
+    const events: string[] = [];
+    const created: string[] = [];
+    const manager = new ChannelManager({
+      config: buildConfig([
+        buildFeishuConfig({ id: "donghao", appId: "cli_old" }),
+        buildFeishuConfig({ id: "team", appId: "cli_team" }),
+      ]),
+      createFeishuChannel(input) {
+        created.push(`${input.id}:${input.appId}`);
+        return fakeChannel(`feishu:${input.id}`, events);
+      },
+    });
+    await manager.start();
+
+    const result = await manager.reloadConfig(
+      buildConfig([
+        buildFeishuConfig({ id: "donghao", appId: "cli_new" }),
+        buildFeishuConfig({ id: "newbot", appId: "cli_newbot" }),
+      ])
+    );
+
+    expect(result).toMatchObject({
+      added: ["feishu:newbot"],
+      removed: ["feishu:team"],
+      restarted: ["feishu:donghao"],
+    });
+    expect(created).toEqual([
+      "donghao:cli_old",
+      "team:cli_team",
+      "donghao:cli_new",
+      "newbot:cli_newbot",
+    ]);
+    expect(events).toEqual([
+      "feishu:donghao:start",
+      "feishu:team:start",
+      "feishu:team:stop",
+      "feishu:donghao:stop",
+      "feishu:donghao:start",
+      "feishu:newbot:start",
+    ]);
+    expect(manager.getStatus().channels.map((channel) => channel.id)).toEqual([
+      "feishu:donghao",
+      "feishu:newbot",
+    ]);
+  });
+
+  test("hot reloads Feishu runtime switches without restarting the channel", async () => {
+    const events: string[] = [];
+    const updates: unknown[] = [];
+    const manager = new ChannelManager({
+      config: buildConfig([buildFeishuConfig({ id: "donghao", sendProgressReplies: false })]),
+      createFeishuChannel(input) {
+        return fakeChannel(`feishu:${input.id}`, events, updates);
+      },
+    });
+    await manager.start();
+
+    const result = await manager.reloadConfig(
+      buildConfig([buildFeishuConfig({ id: "donghao", sendProgressReplies: true })])
+    );
+
+    expect(result).toMatchObject({
+      updated: ["feishu:donghao"],
+      restarted: [],
+    });
+    expect(events).toEqual(["feishu:donghao:start"]);
+    expect(updates).toEqual([
+      expect.objectContaining({
+        id: "donghao",
+        sendProgressReplies: true,
+      }),
+    ]);
+  });
 });
+
+function buildConfig(accounts: FeishuConfig[]) {
+  return {
+    service: { port: 18123, cwd: "/tmp/service" },
+    channels: {
+      feishu: buildFeishuConfig({ id: "default", enabled: false }),
+      feishuAccounts: accounts,
+    },
+  };
+}
+
+function buildFeishuConfig(overrides: Partial<FeishuConfig>): FeishuConfig {
+  return {
+    id: "donghao",
+    enabled: true,
+    status: "configured",
+    appId: "cli_donghao",
+    appSecret: "secret_donghao",
+    botOpenId: "ou_donghao",
+    domain: "feishu",
+    model: "cx@gpt-5.5",
+    cwd: "/tmp/service/donghao",
+    sessionMode: "headless",
+    sendProgressReplies: false,
+    history: { persist: true, maxMessages: 50, nativeResume: true },
+    ...overrides,
+  };
+}

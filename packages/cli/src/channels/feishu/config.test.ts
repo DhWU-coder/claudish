@@ -9,6 +9,7 @@ describe("Feishu config", () => {
       model: "cx@gpt-5.5",
       cwd: "/tmp/project",
       sessionMode: "headless",
+      sendProgressReplies: false,
       history: {
         persist: true,
         maxMessages: 50,
@@ -115,6 +116,7 @@ describe("Feishu config", () => {
         { model: "cx@gpt-5.5", cwd: "/tmp/project" },
         {
           sessionMode: "terminal",
+          sendProgressReplies: true,
           history: {
             persist: false,
             maxMessages: 12,
@@ -124,6 +126,7 @@ describe("Feishu config", () => {
       )
     ).toMatchObject({
       sessionMode: "terminal",
+      sendProgressReplies: true,
       history: {
         persist: false,
         maxMessages: 12,

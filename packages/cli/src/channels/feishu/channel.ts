@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { basename } from "node:path";
 import type { FeishuConfig } from "./config.js";
 import {
   type FeishuMessageEvent,
@@ -10,14 +11,23 @@ import {
   shouldHandleMessage,
   stripBotMention,
 } from "./events.js";
-import { saveFeishuFile } from "./files.js";
+import { type SavedFeishuFile, saveFeishuFile } from "./files.js";
 import type { FeishuHeadlessProgressEvent, FeishuHeadlessRunner } from "./headless-runner.js";
 import { FeishuHeadlessSessionRouter } from "./headless-session-router.js";
 import { type SavedFeishuImage, saveFeishuImage } from "./images.js";
 import { FeishuMessageProgressTracker } from "./message-tracker.js";
 import { FeishuOutputRelay, cleanTerminalOutput } from "./output-relay.js";
-import { type FeishuMessageClient, sendFeishuText } from "./send.js";
-import { type FeishuRoutedSessionStatus, FeishuSessionRouter } from "./session-router.js";
+import {
+  type FeishuReturnFile,
+  extractFeishuReturnFileDirectives,
+  resolveFeishuReturnFile,
+} from "./return-files.js";
+import { type FeishuMessageClient, sendFeishuFile, sendFeishuText } from "./send.js";
+import {
+  type FeishuRoutedSessionStatus,
+  FeishuSessionRouter,
+  type FeishuSessionSendContext,
+} from "./session-router.js";
 
 export interface FeishuEventClient {
   start(onEvent: (payload: unknown) => Promise<void> | void): Promise<void> | void;
@@ -41,7 +51,7 @@ export interface FeishuReactionClient {
 }
 
 export interface FeishuSessionRouterLike {
-  send(conversationKey: string, text: string): Promise<void>;
+  send(conversationKey: string, text: string, context?: FeishuSessionSendContext): Promise<void>;
   listSessions(): FeishuRoutedSessionStatus[];
   resetSession?(conversationKey: string): boolean;
   stopSession?(conversationKey: string): boolean;
@@ -66,7 +76,7 @@ export interface FeishuChannelOptions {
 
 export class FeishuChannel {
   readonly id: string;
-  private readonly config: FeishuConfig;
+  private config: FeishuConfig;
   private readonly eventClient: FeishuEventClient;
   private readonly mediaClient?: FeishuMediaClient;
   private readonly imageVisionEnhancer: (image: SavedFeishuImage) => Promise<SavedFeishuImage>;
@@ -79,6 +89,7 @@ export class FeishuChannel {
   private readonly logger: Pick<Console, "warn" | "error" | "log">;
   private readonly replyTargets = new Map<string, string>();
   private readonly outputRelays = new Map<string, FeishuOutputRelay>();
+  private readonly pendingReturnFiles = new Map<string, FeishuReturnFile[]>();
   private readonly handledMessageIds = new Map<string, number>();
   private readonly pendingEventTasks = new Set<Promise<void>>();
   private readonly messageTracker: FeishuMessageProgressTracker;
@@ -123,7 +134,18 @@ export class FeishuChannel {
       relay.dispose();
     }
     this.outputRelays.clear();
+    this.pendingReturnFiles.clear();
     this.status = this.config.enabled ? "stopped" : "not_configured";
+  }
+
+  updateConfig(config: unknown): void {
+    const next = config as Partial<FeishuConfig>;
+    if (typeof next.sendProgressReplies === "boolean") {
+      this.config = {
+        ...this.config,
+        sendProgressReplies: next.sendProgressReplies,
+      };
+    }
   }
 
   getStatus() {
@@ -184,7 +206,15 @@ export class FeishuChannel {
       if (fileResources.length > 0) {
         this.messageTracker.update(trackedMessage.messageId, { stage: "downloading_files" });
       }
-      const filePaths = await this.saveEventFiles(event);
+      const savedFiles = await this.saveEventFiles(event);
+      const filePaths = savedFiles.map((file) => file.path);
+      this.messageTracker.setFileAttachments(
+        trackedMessage.messageId,
+        savedFiles.map((file) => ({
+          name: basename(file.path),
+          path: file.path,
+        }))
+      );
       if (!text && imageKeys.length === 0 && fileResources.length > 0 && filePaths.length === 0) {
         this.messageTracker.update(trackedMessage.messageId, {
           stage: "failed",
@@ -193,10 +223,16 @@ export class FeishuChannel {
         return;
       }
       this.replyTargets.set(conversationKey, event.messageId);
+      const sendContext: FeishuSessionSendContext = { replyToMessageId: event.messageId };
 
       const command = parseFeishuCommand(text);
       if (command) {
-        await this.handleCommand(conversationKey, command, trackedMessage.messageId);
+        await this.handleCommand(
+          conversationKey,
+          command,
+          trackedMessage.messageId,
+          event.messageId
+        );
         return;
       }
 
@@ -209,12 +245,12 @@ export class FeishuChannel {
         filePaths,
       });
       if (this.messageClient) {
-        this.getOutputRelay(conversationKey).suppressEcho(claudishInput);
+        this.getOutputRelay(conversationKey, sendContext).suppressEcho(claudishInput);
       }
 
       this.messageTracker.update(trackedMessage.messageId, { stage: "queued" });
       this.messageTracker.update(trackedMessage.messageId, { stage: "model_processing" });
-      await this.sessionRouter.send(conversationKey, claudishInput);
+      await this.sessionRouter.send(conversationKey, claudishInput, sendContext);
       this.messageTracker.update(trackedMessage.messageId, { stage: "completed" });
     } catch (error) {
       this.messageTracker.update(trackedMessage.messageId, {
@@ -256,26 +292,59 @@ export class FeishuChannel {
     }
   }
 
-  handleSessionOutput(conversationKey: string, data: string | Uint8Array): void {
+  handleSessionOutput(
+    conversationKey: string,
+    data: string | Uint8Array,
+    context?: FeishuSessionSendContext
+  ): void {
     this.messageTracker.updateActiveConversation(conversationKey, "replying");
     if (!this.messageClient) {
       const text = typeof data === "string" ? data : Buffer.from(data).toString("utf-8");
-      this.messageTracker.appendOutput(conversationKey, cleanTerminalOutput(text));
+      const cleanText = extractFeishuReturnFileDirectives(cleanTerminalOutput(text)).text;
+      this.messageTracker.appendOutput(conversationKey, cleanText);
+      this.messageTracker.appendProgressEvent(conversationKey, {
+        type: "assistant_text",
+        text: cleanText,
+      });
       return;
     }
 
-    const relay = this.getOutputRelay(conversationKey);
+    const relayKey = this.outputRelayKey(conversationKey, context);
+    const relay = this.getOutputRelay(conversationKey, context);
     const text = relay.append(data);
+    if (this.pendingReturnFiles.has(relayKey)) {
+      this.flushRelayAndReturnFiles(
+        relayKey,
+        this.resolveReplyToMessageId(conversationKey, context)
+      ).catch((error) => {
+        this.logger.error(`Feishu file reply failed: ${formatError(error)}`);
+      });
+    }
     if (text) {
-      this.messageTracker.appendOutput(conversationKey, formatFeishuProgressEvent({
+      const event: FeishuHeadlessProgressEvent = {
         type: "assistant_text",
         text,
-      }));
+      };
+      this.messageTracker.appendOutput(
+        conversationKey,
+        formatFeishuProgressEvent({
+          ...event,
+        })
+      );
+      this.messageTracker.appendProgressEvent(conversationKey, event);
     }
   }
 
-  handleSessionProgress(conversationKey: string, event: FeishuHeadlessProgressEvent): void {
+  handleSessionProgress(
+    conversationKey: string,
+    event: FeishuHeadlessProgressEvent,
+    context?: FeishuSessionSendContext
+  ): void {
     this.messageTracker.appendOutput(conversationKey, formatFeishuProgressEvent(event));
+    this.messageTracker.appendProgressEvent(conversationKey, event);
+    if (this.config.sendProgressReplies && event.type === "assistant_text") {
+      this.sendAssistantProgressReply(conversationKey, event.text, context);
+    }
   }
 
   private async saveEventImages(
@@ -306,10 +375,10 @@ export class FeishuChannel {
 
   private async saveEventFiles(
     event: ReturnType<typeof parseFeishuMessageEvent>
-  ): Promise<string[]> {
+  ): Promise<SavedFeishuFile[]> {
     if (!event || !this.mediaClient?.downloadFile) return [];
 
-    const filePaths: string[] = [];
+    const savedFiles: SavedFeishuFile[] = [];
     for (const resource of extractFileResources(event)) {
       try {
         const file = await this.mediaClient.downloadFile(resource.fileKey, event.messageId);
@@ -321,16 +390,20 @@ export class FeishuChannel {
           buffer: file.buffer,
           contentType: file.contentType,
         });
-        filePaths.push(savedFile.path);
+        savedFiles.push(savedFile);
       } catch (error) {
         this.logger.warn(error instanceof Error ? error.message : String(error));
       }
     }
-    return filePaths;
+    return savedFiles;
   }
 
-  private getOutputRelay(conversationKey: string): FeishuOutputRelay {
-    const existing = this.outputRelays.get(conversationKey);
+  private getOutputRelay(
+    conversationKey: string,
+    context?: FeishuSessionSendContext
+  ): FeishuOutputRelay {
+    const relayKey = this.outputRelayKey(conversationKey, context);
+    const existing = this.outputRelays.get(relayKey);
     if (existing) return existing;
 
     const relay = new FeishuOutputRelay({
@@ -338,49 +411,140 @@ export class FeishuChannel {
       onError: (error) => {
         this.logger.error(`Feishu reply failed: ${formatError(error)}`);
       },
+      transformText: (text) => this.collectReturnFileDirectives(relayKey, text),
       sendText: async (text) => {
-        const replyToMessageId = this.replyTargets.get(conversationKey);
+        const replyToMessageId = this.resolveReplyToMessageId(conversationKey, context);
         if (!replyToMessageId || !this.messageClient) return;
         await sendFeishuText(this.messageClient, { replyToMessageId, text });
       },
     });
-    this.outputRelays.set(conversationKey, relay);
+    this.outputRelays.set(relayKey, relay);
     return relay;
+  }
+
+  private collectReturnFileDirectives(relayKey: string, text: string): string {
+    const extracted = extractFeishuReturnFileDirectives(text, this.config.cwd);
+    const files: FeishuReturnFile[] = [];
+    for (const filePath of extracted.filePaths) {
+      try {
+        files.push(resolveFeishuReturnFile(this.config.cwd, filePath));
+      } catch (error) {
+        this.logger.error(`Feishu return file ignored: ${formatError(error)}`);
+      }
+    }
+    if (files.length > 0) {
+      this.pendingReturnFiles.set(relayKey, [
+        ...(this.pendingReturnFiles.get(relayKey) ?? []),
+        ...files,
+      ]);
+    }
+    return extracted.text;
+  }
+
+  private async flushRelayAndReturnFiles(
+    relayKey: string,
+    replyToMessageId: string | undefined
+  ): Promise<void> {
+    await this.outputRelays.get(relayKey)?.flush();
+    await this.sendPendingReturnFiles(relayKey, replyToMessageId);
+  }
+
+  private async sendPendingReturnFiles(
+    relayKey: string,
+    replyToMessageId: string | undefined
+  ): Promise<void> {
+    const files = this.pendingReturnFiles.get(relayKey) ?? [];
+    this.pendingReturnFiles.delete(relayKey);
+    for (const file of files) {
+      await this.replyReturnFile(file, replyToMessageId);
+    }
+  }
+
+  private sendAssistantProgressReply(
+    conversationKey: string,
+    text: string,
+    context?: FeishuSessionSendContext
+  ): void {
+    if (!this.messageClient) return;
+
+    const cleanText = sanitizeFeishuAssistantProgressText(text);
+    if (!cleanText) return;
+
+    const relayKey = this.outputRelayKey(conversationKey, context);
+    this.getOutputRelay(conversationKey, context).append(cleanText);
+    if (this.pendingReturnFiles.has(relayKey)) {
+      this.flushRelayAndReturnFiles(
+        relayKey,
+        this.resolveReplyToMessageId(conversationKey, context)
+      ).catch((error) => {
+        this.logger.error(`Feishu file reply failed: ${formatError(error)}`);
+      });
+    }
   }
 
   private async handleCommand(
     conversationKey: string,
     command: FeishuCommand,
-    messageId: string
+    messageId: string,
+    replyToMessageId: string
   ): Promise<void> {
     this.messageTracker.update(messageId, { stage: "replying" });
-    if (command === "new" || command === "clear") {
+    if (command.type === "new" || command.type === "clear") {
       if (this.sessionRouter.resetSession) {
         this.sessionRouter.resetSession(conversationKey);
       } else {
         this.sessionRouter.stopSession?.(conversationKey);
       }
       this.disposeRelay(conversationKey);
-      await this.replyCommand(conversationKey, "已开启新会话。");
+      await this.replyCommand("已开启新会话。", replyToMessageId);
+      this.messageTracker.update(messageId, { stage: "completed" });
+      return;
+    }
+
+    if (command.type === "file") {
+      await this.replyReturnFile(
+        resolveFeishuReturnFile(this.config.cwd, command.path),
+        replyToMessageId
+      );
       this.messageTracker.update(messageId, { stage: "completed" });
       return;
     }
 
     this.sessionRouter.stopSession?.(conversationKey);
     this.disposeRelay(conversationKey);
-    await this.replyCommand(conversationKey, "已停止当前会话。");
+    await this.replyCommand("已停止当前会话。", replyToMessageId);
     this.messageTracker.update(messageId, { stage: "stopped" });
   }
 
-  private async replyCommand(conversationKey: string, text: string): Promise<void> {
-    const replyToMessageId = this.replyTargets.get(conversationKey);
+  private async replyCommand(text: string, replyToMessageId: string | undefined): Promise<void> {
     if (!replyToMessageId || !this.messageClient) return;
     await sendFeishuText(this.messageClient, { replyToMessageId, text });
   }
 
+  private async replyReturnFile(
+    file: FeishuReturnFile,
+    replyToMessageId: string | undefined
+  ): Promise<void> {
+    if (!replyToMessageId || !this.messageClient) return;
+    await sendFeishuFile(this.messageClient, {
+      replyToMessageId,
+      filePath: file.path,
+      fileName: file.fileName,
+    });
+  }
+
   private disposeRelay(conversationKey: string): void {
-    this.outputRelays.get(conversationKey)?.dispose();
-    this.outputRelays.delete(conversationKey);
+    for (const relayKey of this.outputRelays.keys()) {
+      if (!this.isRelayKeyForConversation(relayKey, conversationKey)) continue;
+      this.outputRelays.get(relayKey)?.dispose();
+      this.outputRelays.delete(relayKey);
+      this.pendingReturnFiles.delete(relayKey);
+    }
+    for (const relayKey of this.pendingReturnFiles.keys()) {
+      if (this.isRelayKeyForConversation(relayKey, conversationKey)) {
+        this.pendingReturnFiles.delete(relayKey);
+      }
+    }
   }
 
   private async addTypingReaction(
@@ -414,8 +578,11 @@ export class FeishuChannel {
   }
 
   private createDefaultSessionRouter(options: FeishuChannelOptions): FeishuSessionRouterLike {
-    const onOutput = (conversationKey: string, data: string | Uint8Array) =>
-      this.handleSessionOutput(conversationKey, data);
+    const onOutput = (
+      conversationKey: string,
+      data: string | Uint8Array,
+      context: FeishuSessionSendContext | undefined
+    ) => this.handleSessionOutput(conversationKey, data, context);
     if (options.config.sessionMode === "terminal") {
       return new FeishuSessionRouter({
         model: options.config.model,
@@ -431,8 +598,26 @@ export class FeishuChannel {
       historyBaseDir: options.historyBaseDir,
       runHeadless: options.headlessRunner,
       onOutput,
-      onProgress: (conversationKey, event) => this.handleSessionProgress(conversationKey, event),
+      onProgress: (conversationKey, event, context) =>
+        this.handleSessionProgress(conversationKey, event, context),
     });
+  }
+
+  private outputRelayKey(conversationKey: string, context?: FeishuSessionSendContext): string {
+    return context?.replyToMessageId
+      ? `${conversationKey}\u0000${context.replyToMessageId}`
+      : conversationKey;
+  }
+
+  private resolveReplyToMessageId(
+    conversationKey: string,
+    context?: FeishuSessionSendContext
+  ): string | undefined {
+    return context?.replyToMessageId ?? this.replyTargets.get(conversationKey);
+  }
+
+  private isRelayKeyForConversation(relayKey: string, conversationKey: string): boolean {
+    return relayKey === conversationKey || relayKey.startsWith(`${conversationKey}\u0000`);
   }
 }
 
@@ -440,13 +625,19 @@ function resolveFeishuChannelId(accountId: string | undefined): string {
   return !accountId || accountId === "default" ? "feishu" : `feishu:${accountId}`;
 }
 
-type FeishuCommand = "new" | "clear" | "stop";
+type FeishuCommand =
+  | { type: "new" }
+  | { type: "clear" }
+  | { type: "stop" }
+  | { type: "file"; path: string };
 
 function parseFeishuCommand(text: string): FeishuCommand | null {
   const command = text.trim().toLowerCase();
-  if (command === "/new") return "new";
-  if (command === "/clear") return "clear";
-  if (command === "/stop") return "stop";
+  if (command === "/new") return { type: "new" };
+  if (command === "/clear") return { type: "clear" };
+  if (command === "/stop") return { type: "stop" };
+  const file = text.trim().match(/^\/(?:file|sendfile)\s+(.+)$/i);
+  if (file) return { type: "file", path: file[1].trim() };
   return null;
 }
 
@@ -494,3 +685,32 @@ function formatProgressPayload(input: unknown): string {
     return String(input);
   }
 }
+
+function sanitizeFeishuAssistantProgressText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed || !startsWithLeakedProgressDraft(trimmed)) return trimmed;
+
+  const firstChinese = trimmed.search(/[\u3400-\u9fff]/);
+  if (firstChinese < 0) return "";
+
+  return trimmed.slice(firstChinese).trim();
+}
+
+function startsWithLeakedProgressDraft(text: string): boolean {
+  if (!/^\*\*[A-Za-z][A-Za-z0-9\s:;,'".!?/-]{3,100}\*\*/.test(text)) return false;
+
+  const head = text.slice(0, 1000).replace(/\s+/g, " ").toLowerCase();
+  return PROGRESS_DRAFT_LEAKAGE_MARKERS.some((marker) => head.includes(marker));
+}
+
+const PROGRESS_DRAFT_LEAKAGE_MARKERS = [
+  "i need to",
+  "i should",
+  "i suspect",
+  "maybe i",
+  "i'm planning",
+  "i will verify",
+  "i'll write",
+  "it feels like",
+  "the user requested",
+];

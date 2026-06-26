@@ -1,3 +1,5 @@
+import type { FeishuHeadlessProgressEvent } from "./headless-runner.js";
+
 export type FeishuMessageProgressStage =
   | "received"
   | "downloading_images"
@@ -8,6 +10,15 @@ export type FeishuMessageProgressStage =
   | "completed"
   | "failed"
   | "stopped";
+
+export type FeishuTrackedProgressEvent = FeishuHeadlessProgressEvent & {
+  at: number;
+};
+
+export interface FeishuTrackedFileAttachment {
+  name: string;
+  path: string;
+}
 
 export interface FeishuTrackedMessage {
   accountId: string;
@@ -24,6 +35,8 @@ export interface FeishuTrackedMessage {
   elapsedMs: number;
   error?: string;
   output?: string;
+  progressEvents?: FeishuTrackedProgressEvent[];
+  fileAttachments?: FeishuTrackedFileAttachment[];
 }
 
 export interface FeishuTrackedSession {
@@ -41,6 +54,8 @@ export interface FeishuTrackedSession {
   elapsedMs: number;
   error?: string;
   output?: string;
+  progressEvents?: FeishuTrackedProgressEvent[];
+  fileAttachments?: FeishuTrackedFileAttachment[];
   currentMessage: FeishuTrackedMessage;
   messages: FeishuTrackedMessage[];
 }
@@ -98,10 +113,7 @@ export class FeishuMessageProgressTracker {
     return message;
   }
 
-  update(
-    messageId: string,
-    patch: { stage?: FeishuMessageProgressStage; error?: string }
-  ): void {
+  update(messageId: string, patch: { stage?: FeishuMessageProgressStage; error?: string }): void {
     const message = this.messages.get(messageId);
     if (!message) return;
 
@@ -133,6 +145,31 @@ export class FeishuMessageProgressTracker {
     message.elapsedMs = Math.max(0, timestamp - message.receivedAt);
   }
 
+  appendProgressEvent(conversationKey: string, event: FeishuHeadlessProgressEvent): void {
+    const messageId = this.activeByConversation.get(conversationKey);
+    if (!messageId) return;
+    const message = this.messages.get(messageId);
+    if (!message) return;
+
+    const timestamp = this.now();
+    message.progressEvents = trimProgressEvents([
+      ...(message.progressEvents ?? []),
+      { at: timestamp, ...event },
+    ]);
+    message.updatedAt = timestamp;
+    message.elapsedMs = Math.max(0, timestamp - message.receivedAt);
+  }
+
+  setFileAttachments(messageId: string, fileAttachments: FeishuTrackedFileAttachment[]): void {
+    const message = this.messages.get(messageId);
+    if (!message) return;
+
+    const timestamp = this.now();
+    message.fileAttachments = fileAttachments.map((file) => ({ ...file }));
+    message.updatedAt = timestamp;
+    message.elapsedMs = Math.max(0, timestamp - message.receivedAt);
+  }
+
   setOutput(conversationKey: string, output: string): void {
     const messageId = this.activeByConversation.get(conversationKey);
     if (!messageId) return;
@@ -152,6 +189,7 @@ export class FeishuMessageProgressTracker {
       .filter((message): message is FeishuTrackedMessage => Boolean(message))
       .map((message) => ({
         ...message,
+        fileAttachments: cloneFileAttachments(message.fileAttachments),
         elapsedMs: isFinalStage(message.stage)
           ? message.elapsedMs
           : Math.max(0, timestamp - message.receivedAt),
@@ -179,6 +217,8 @@ export class FeishuMessageProgressTracker {
           elapsedMs: message.elapsedMs,
           error: message.error,
           output: message.output,
+          progressEvents: cloneProgressEvents(message.progressEvents),
+          fileAttachments: cloneFileAttachments(message.fileAttachments),
           currentMessage: message,
           messages: [message],
         });
@@ -188,6 +228,14 @@ export class FeishuMessageProgressTracker {
       existing.messageCount += 1;
       existing.startedAt = Math.min(existing.startedAt, message.receivedAt);
       existing.updatedAt = Math.max(existing.updatedAt, message.updatedAt);
+      existing.fileAttachments = mergeFileAttachments(
+        existing.fileAttachments,
+        message.fileAttachments
+      );
+      existing.progressEvents = mergeProgressEvents(
+        existing.progressEvents,
+        message.progressEvents
+      );
       existing.messages.push(message);
     }
 
@@ -217,4 +265,37 @@ function isFinalStage(stage: FeishuMessageProgressStage): boolean {
 
 function trimOutput(output: string): string {
   return output.length > 12000 ? output.slice(-12000) : output;
+}
+
+function trimProgressEvents(events: FeishuTrackedProgressEvent[]): FeishuTrackedProgressEvent[] {
+  return events.length > 160 ? events.slice(-160) : events;
+}
+
+function cloneProgressEvents(
+  events: FeishuTrackedProgressEvent[] | undefined
+): FeishuTrackedProgressEvent[] | undefined {
+  return events ? events.map((event) => ({ ...event })) : undefined;
+}
+
+function mergeProgressEvents(
+  left: FeishuTrackedProgressEvent[] | undefined,
+  right: FeishuTrackedProgressEvent[] | undefined
+): FeishuTrackedProgressEvent[] | undefined {
+  const merged = [...(left ?? []), ...(right ?? [])];
+  if (merged.length === 0) return undefined;
+  return trimProgressEvents(merged.sort((a, b) => a.at - b.at));
+}
+
+function cloneFileAttachments(
+  files: FeishuTrackedFileAttachment[] | undefined
+): FeishuTrackedFileAttachment[] | undefined {
+  return files ? files.map((file) => ({ ...file })) : undefined;
+}
+
+function mergeFileAttachments(
+  left: FeishuTrackedFileAttachment[] | undefined,
+  right: FeishuTrackedFileAttachment[] | undefined
+): FeishuTrackedFileAttachment[] | undefined {
+  const merged = [...(left ?? []), ...(right ?? [])];
+  return merged.length > 0 ? merged.map((file) => ({ ...file })) : undefined;
 }

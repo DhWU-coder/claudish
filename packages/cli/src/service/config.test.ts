@@ -72,6 +72,7 @@ describe("claudish config.yaml", () => {
         "    model: cx@gpt-5.5",
         "    cwd: /tmp/feishu-project",
         "    sessionMode: headless",
+        "    sendProgressReplies: true",
         "    history:",
         "      persist: true",
         "      maxMessages: 80",
@@ -99,6 +100,7 @@ describe("claudish config.yaml", () => {
       model: "cx@gpt-5.5",
       cwd: "/tmp/feishu-project",
       sessionMode: "headless",
+      sendProgressReplies: true,
       history: {
         persist: true,
         maxMessages: 80,

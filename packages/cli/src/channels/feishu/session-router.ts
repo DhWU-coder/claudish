@@ -9,8 +9,16 @@ export interface FeishuSessionRouterOptions {
   createSession?: (options: CreatePythonTerminalSessionOptions) => WebTerminalSession;
   model: string;
   cwd: string;
-  onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
+  onOutput?: (
+    conversationKey: string,
+    data: string | Uint8Array,
+    context: FeishuSessionSendContext | undefined
+  ) => void;
   onExit?: (conversationKey: string, code: number | null) => void;
+}
+
+export interface FeishuSessionSendContext {
+  replyToMessageId?: string;
 }
 
 export interface FeishuRoutedSessionStatus {
@@ -26,6 +34,7 @@ interface RoutedSession {
   exited: boolean;
   trustPromptBuffer: string;
   trustPromptConfirmed: boolean;
+  activeContext: FeishuSessionSendContext | undefined;
 }
 
 export class FeishuSessionRouter {
@@ -35,7 +44,11 @@ export class FeishuSessionRouter {
   private readonly sessions = new Map<string, RoutedSession>();
   private readonly model: string;
   private readonly cwd: string;
-  private readonly onOutput?: (conversationKey: string, data: string | Uint8Array) => void;
+  private readonly onOutput?: (
+    conversationKey: string,
+    data: string | Uint8Array,
+    context: FeishuSessionSendContext | undefined
+  ) => void;
   private readonly onExit?: (conversationKey: string, code: number | null) => void;
 
   constructor(options: FeishuSessionRouterOptions) {
@@ -46,13 +59,18 @@ export class FeishuSessionRouter {
     this.onExit = options.onExit;
   }
 
-  async send(conversationKey: string, text: string): Promise<void> {
+  async send(
+    conversationKey: string,
+    text: string,
+    context?: FeishuSessionSendContext
+  ): Promise<void> {
     const routed = this.getOrCreateSession(conversationKey);
     const input = text.endsWith("\n") ? text : `${text}\n`;
 
     routed.queue = routed.queue
       .catch(() => undefined)
       .then(() => {
+        routed.activeContext = context;
         routed.session.write(input);
       });
 
@@ -102,7 +120,7 @@ export class FeishuSessionRouter {
       },
       onData: (data) => {
         if (this.maybeHandleTrustPrompt(routed, data)) return;
-        this.onOutput?.(conversationKey, data);
+        this.onOutput?.(conversationKey, data, routed.activeContext);
       },
       onExit: (code) => {
         routed.exited = true;
@@ -116,6 +134,7 @@ export class FeishuSessionRouter {
       exited: false,
       trustPromptBuffer: "",
       trustPromptConfirmed: false,
+      activeContext: undefined,
     };
 
     this.sessions.set(conversationKey, routed);

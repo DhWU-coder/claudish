@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FeishuChannel, type FeishuEventClient } from "./channel.js";
@@ -14,6 +14,21 @@ const TINY_PNG = Buffer.from(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForExpectation(assertion: () => void, timeoutMs = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(5);
+    }
+  }
+  throw lastError;
 }
 
 beforeEach(() => {
@@ -239,14 +254,213 @@ describe("FeishuChannel", () => {
     expect(calls[0]).toMatchObject({
       model: "cx@gpt-5.5",
       cwd,
-      prompt: "[Alice] hello\n",
       resume: false,
       nativeResume: true,
     });
-    expect(replies).toEqual(["om_1:纯文本回答"]);
+    expect(calls[0].prompt).toContain("[[claudish:file:");
+    expect(calls[0].prompt).toContain("[Alice] hello\n");
+    await waitForExpectation(() => {
+      expect(replies).toEqual(["om_1:纯文本回答"]);
+    });
   });
 
-  test("headless progress appears in monitor without being sent as Feishu replies", async () => {
+  test("headless queued replies stay bound to the source message", async () => {
+    const replies: string[] = [];
+    let finishFirstRun!: () => void;
+    let markFirstRunStarted!: () => void;
+    const firstRunStarted = new Promise<void>((resolve) => {
+      markFirstRunStarted = resolve;
+    });
+    const firstRunMayFinish = new Promise<void>((resolve) => {
+      finishFirstRun = resolve;
+    });
+    let runCount = 0;
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async () => {
+        runCount += 1;
+        if (runCount === 1) {
+          markFirstRunStarted();
+          await firstRunMayFinish;
+          return { text: "第一条回复" };
+        }
+        return { text: "第二条回复" };
+      },
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(`${input.messageId}:${input.text}`);
+        },
+        async sendText() {},
+      },
+    });
+
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> 第一条', undefined, "om_1")
+    );
+    await firstRunStarted;
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> 第二条', undefined, "om_2")
+    );
+    await delay(10);
+    finishFirstRun();
+    await delay(80);
+
+    expect(replies).toEqual(["om_1:第一条回复", "om_2:第二条回复"]);
+  });
+
+  test("headless output sends return-file directives as Feishu files without showing the directive", async () => {
+    const replies: string[] = [];
+    const sentFiles: string[] = [];
+    const reportPath = join(cwd, "report.pdf");
+    writeFileSync(reportPath, "pdf-data", { flag: "w" });
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async () => ({
+        text: "报告已经生成。\n\n[[claudish:file:report.pdf]]",
+      }),
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+        async replyFile(input) {
+          sentFiles.push(`${input.messageId}:${input.filePath}`);
+        },
+        async sendFile() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> 生成报告'));
+    await delay(30);
+
+    expect(replies).toEqual(["报告已经生成。"]);
+    expect(sentFiles).toEqual([`om_1:${reportPath}`]);
+    expect(channel.getStatus().recentSessions?.[0].output).not.toContain("[[claudish:file:");
+  });
+
+  test("headless output sends cwd-local file paths as Feishu files", async () => {
+    const replies: string[] = [];
+    const sentFiles: string[] = [];
+    const reportPath = join(cwd, "2026年金价整理.xlsx");
+    writeFileSync(reportPath, "xlsx-data", { flag: "w" });
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async () => ({
+        text: [
+          "已整理好 Excel 文件：",
+          "```text",
+          reportPath,
+          "```",
+          "内容包括：",
+          "- 月度汇总",
+        ].join("\n"),
+      }),
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+        async replyFile(input) {
+          sentFiles.push(`${input.messageId}:${input.filePath}`);
+        },
+        async sendFile() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> 整理文件'));
+    await delay(30);
+
+    expect(replies).toEqual(["已整理好 Excel 文件：\n内容包括：\n- 月度汇总"]);
+    expect(sentFiles).toEqual([`om_1:${reportPath}`]);
+  });
+
+  test("headless queued return files stay bound to the source message", async () => {
+    const sentFiles: string[] = [];
+    const firstFile = join(cwd, "first.txt");
+    const secondFile = join(cwd, "second.txt");
+    writeFileSync(firstFile, "first");
+    writeFileSync(secondFile, "second");
+    let finishFirstRun!: () => void;
+    let markFirstRunStarted!: () => void;
+    const firstRunStarted = new Promise<void>((resolve) => {
+      markFirstRunStarted = resolve;
+    });
+    const firstRunMayFinish = new Promise<void>((resolve) => {
+      finishFirstRun = resolve;
+    });
+    let runCount = 0;
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async () => {
+        runCount += 1;
+        if (runCount === 1) {
+          markFirstRunStarted();
+          await firstRunMayFinish;
+          return { text: "第一条文件\n[[claudish:file:first.txt]]" };
+        }
+        return { text: "第二条文件\n[[claudish:file:second.txt]]" };
+      },
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText() {},
+        async sendText() {},
+        async replyFile(input) {
+          sentFiles.push(`${input.messageId}:${input.filePath}`);
+        },
+        async sendFile() {},
+      },
+    });
+
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> 第一条', undefined, "om_1")
+    );
+    await firstRunStarted;
+    await channel.handleEvent(
+      textPayload('<at user_id="ou_bot">bot</at> 第二条', undefined, "om_2")
+    );
+    await delay(10);
+    finishFirstRun();
+    await delay(80);
+
+    expect(sentFiles).toEqual([`om_1:${firstFile}`, `om_2:${secondFile}`]);
+  });
+
+  test("headless assistant progress stays in monitor by default", async () => {
     const replies: string[] = [];
     let finishRun!: () => void;
     const runMayFinish = new Promise<void>((resolve) => {
@@ -278,9 +492,55 @@ describe("FeishuChannel", () => {
     });
 
     await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
-    await delay(10);
+    await delay(30);
 
     expect(replies).toEqual([]);
+    expect(channel.getStatus().recentSessions?.[0].output).toContain("我先看项目结构。");
+    expect(channel.getStatus().recentSessions?.[0].output).toContain("src/a.ts");
+
+    finishRun();
+    await waitForExpectation(() => {
+      expect(replies).toEqual(["om_1:最终回答"]);
+    });
+  });
+
+  test("headless assistant progress is sent as Feishu replies when enabled", async () => {
+    const replies: string[] = [];
+    let finishRun!: () => void;
+    const runMayFinish = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+        sendProgressReplies: true,
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async (input) => {
+        input.onProgress?.({ type: "assistant_text", text: "我先看项目结构。" });
+        input.onProgress?.({ type: "tool_start", name: "Read", input: { file_path: "src/a.ts" } });
+        await runMayFinish;
+        return { text: "最终回答" };
+      },
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(`${input.messageId}:${input.text}`);
+        },
+        async sendText() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
+
+    await waitForExpectation(() => {
+      expect(replies).toEqual(["om_1:我先看项目结构。"]);
+    });
     expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
       conversationKey: "group:oc_group",
       output: expect.stringContaining("Read"),
@@ -289,8 +549,61 @@ describe("FeishuChannel", () => {
     expect(channel.getStatus().recentSessions?.[0].output).toContain("src/a.ts");
 
     finishRun();
-    await delay(30);
-    expect(replies).toEqual(["om_1:最终回答"]);
+    await waitForExpectation(() => {
+      expect(replies).toEqual(["om_1:我先看项目结构。", "om_1:最终回答"]);
+    });
+  });
+
+  test("headless progress replies strip leaked English draft text", async () => {
+    const replies: string[] = [];
+    let finishRun!: () => void;
+    const runMayFinish = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    const channel = new FeishuChannel({
+      config: configuredConfig({
+        sessionMode: "headless",
+        history: {
+          persist: true,
+          maxMessages: 50,
+          nativeResume: true,
+        },
+        sendProgressReplies: true,
+      }),
+      outputQuietMs: 1,
+      headlessRunner: async (input) => {
+        input.onProgress?.({
+          type: "assistant_text",
+          text:
+            "**Creating XLSX file**\n\n" +
+            "I need to create an XLSX file, but I do not have openpyxl installed. " +
+            "Maybe I should write a script.数据源可以正常读取。我现在生成 Excel 文件。",
+        });
+        await runMayFinish;
+        return { text: "最终回答" };
+      },
+      historyBaseDir: join(cwd, "history"),
+      messageClient: {
+        async replyText(input) {
+          replies.push(`${input.messageId}:${input.text}`);
+        },
+        async sendText() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> hello'));
+
+    await waitForExpectation(() => {
+      expect(replies).toEqual(["om_1:数据源可以正常读取。我现在生成 Excel 文件。"]);
+    });
+
+    finishRun();
+    await waitForExpectation(() => {
+      expect(replies).toEqual([
+        "om_1:数据源可以正常读取。我现在生成 Excel 文件。",
+        "om_1:最终回答",
+      ]);
+    });
   });
 
   test("adds and removes typing reaction while processing a message", async () => {
@@ -399,6 +712,80 @@ describe("FeishuChannel", () => {
 
     expect(events).toEqual(["reset:group:oc_group", "reset:group:oc_group"]);
     expect(replies).toEqual(["om_1:已开启新会话。", "om_2:已开启新会话。"]);
+  });
+
+  test("slash file sends a cwd-local file without routing to the model", async () => {
+    const filePath = join(cwd, "result.txt");
+    writeFileSync(filePath, "result");
+    const routed: string[] = [];
+    const sentFiles: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      messageClient: {
+        async replyText() {},
+        async sendText() {},
+        async replyFile(input) {
+          sentFiles.push(`${input.messageId}:${input.filePath}`);
+        },
+        async sendFile() {},
+      },
+      sessionRouter: {
+        async send(_conversationKey, text) {
+          routed.push(text);
+        },
+        listSessions: () => [],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /file result.txt'));
+    await delay(20);
+
+    expect(routed).toEqual([]);
+    expect(sentFiles).toEqual([`om_1:${filePath}`]);
+    expect(channel.getStatus().recentMessages?.[0]).toMatchObject({
+      stage: "completed",
+    });
+  });
+
+  test("slash file rejects paths outside the channel cwd", async () => {
+    const outsidePath = join(cwd, "..", "outside.txt");
+    writeFileSync(outsidePath, "secret");
+    const sentFiles: string[] = [];
+    const errors: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig(),
+      logger: {
+        log() {},
+        warn() {},
+        error(input) {
+          errors.push(String(input));
+        },
+      },
+      messageClient: {
+        async replyText() {},
+        async sendText() {},
+        async replyFile(input) {
+          sentFiles.push(input.filePath);
+        },
+        async sendFile() {},
+      },
+      sessionRouter: {
+        async send() {},
+        listSessions: () => [],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /file ../outside.txt'));
+    await delay(20);
+
+    expect(sentFiles).toEqual([]);
+    expect(errors[0]).toContain("只能回传当前工作目录内的文件");
+    expect(channel.getStatus().recentMessages?.[0]).toMatchObject({
+      stage: "failed",
+    });
+    rmSync(outsidePath, { force: true });
   });
 
   test("slash stop stops the current conversation without routing to model", async () => {
@@ -540,9 +927,21 @@ describe("FeishuChannel", () => {
     expect(channel.getStatus().recentSessions?.[0]).toMatchObject({
       conversationKey: "group:oc_group",
       fileCount: 1,
+      fileAttachments: [
+        {
+          name: "om_file-file_1-报告.pdf",
+          path: filePath,
+        },
+      ],
       currentMessage: expect.objectContaining({
         preview: "[文件 x1]",
         fileCount: 1,
+        fileAttachments: [
+          {
+            name: "om_file-file_1-报告.pdf",
+            path: filePath,
+          },
+        ],
         stage: "completed",
       }),
     });
@@ -762,7 +1161,8 @@ describe("FeishuChannel", () => {
         "cx@gpt-5.5 • $0.000 • N/A",
         "▶▶ bypass permissions on (shift+tab to cycle)",
         "ctrl+g to edit in Vim",
-      ].join("\n")
+      ].join("\n"),
+      { replyToMessageId: "om_1" }
     );
     await delay(10);
 
