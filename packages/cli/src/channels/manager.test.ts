@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FeishuConfig } from "./feishu/config.js";
 import { ChannelManager } from "./manager.js";
-import type { Channel } from "./types.js";
+import type { Channel, ChannelConnectionTestResult } from "./types.js";
 
 function fakeChannel(id: string, events: string[], updates: unknown[] = []): Channel {
   return {
@@ -19,6 +19,15 @@ function fakeChannel(id: string, events: string[], updates: unknown[] = []): Cha
     },
     getStatus() {
       return { id, status: "connected", activeSessions: 1 };
+    },
+  };
+}
+
+function fakeTestableChannel(id: string, result: ChannelConnectionTestResult): Channel {
+  return {
+    ...fakeChannel(id, []),
+    async testConnection() {
+      return result;
     },
   };
 }
@@ -43,6 +52,28 @@ describe("ChannelManager", () => {
 
     expect(manager.getStatus()).toEqual({
       channels: [{ id: "feishu", status: "connected", activeSessions: 1 }],
+    });
+  });
+
+  test("tests a single channel connection", async () => {
+    const manager = new ChannelManager({
+      channels: [
+        fakeTestableChannel("feishu:donghao", {
+          ok: true,
+          latencyMs: 18,
+          checks: [{ name: "tenant_access_token", ok: true }],
+        }),
+      ],
+    });
+
+    await expect(manager.testChannelConnection("feishu:donghao")).resolves.toEqual({
+      ok: true,
+      latencyMs: 18,
+      checks: [{ name: "tenant_access_token", ok: true }],
+    });
+    await expect(manager.testChannelConnection("feishu:missing")).resolves.toMatchObject({
+      ok: false,
+      error: "Channel not found.",
     });
   });
 

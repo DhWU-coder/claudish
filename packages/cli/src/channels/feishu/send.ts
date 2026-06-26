@@ -1,9 +1,18 @@
 import { createReadStream } from "node:fs";
 import { basename, extname } from "node:path";
+import type { ChannelConnectionCheck, ChannelConnectionTestResult } from "../types.js";
+
+export type FeishuConnectionCheck = ChannelConnectionCheck;
+export type FeishuConnectionTestResult = ChannelConnectionTestResult;
+
+export interface FeishuConnectionTestInput {
+  expectedBotOpenId?: string;
+}
 
 export interface FeishuMessageClient {
   replyText(input: { messageId: string; text: string }): Promise<void>;
   sendText(input: { receiveId: string; receiveIdType: string; text: string }): Promise<void>;
+  testConnection?(input: FeishuConnectionTestInput): Promise<FeishuConnectionTestResult>;
   replyFile?(input: { messageId: string; filePath: string; fileName?: string }): Promise<void>;
   sendFile?(input: {
     receiveId: string;
@@ -29,6 +38,15 @@ export interface FeishuFileTarget {
 }
 
 interface FeishuSdkMessageClientLike {
+  auth?: {
+    v3?: {
+      tenantAccessToken?: {
+        internal(
+          input: unknown
+        ): Promise<{ code?: number; msg?: string; tenant_access_token?: string }>;
+      };
+    };
+  };
   im: {
     v1: {
       file?: {
@@ -94,7 +112,8 @@ export async function sendFeishuFile(
 }
 
 export function createSdkFeishuMessageClient(
-  client: FeishuSdkMessageClientLike
+  client: FeishuSdkMessageClientLike,
+  config?: { appId?: string; appSecret?: string }
 ): FeishuMessageClient {
   const uploadFile = async (filePath: string, fileName?: string): Promise<string> => {
     if (!client.im.v1.file?.create) throw new Error("Feishu file upload API is unavailable");
@@ -126,6 +145,9 @@ export function createSdkFeishuMessageClient(
         },
       });
     },
+    async testConnection(input) {
+      return testSdkFeishuConnection(client, input, config);
+    },
     async replyFile(input) {
       const fileKey = await uploadFile(input.filePath, input.fileName);
       await client.im.v1.message.reply({
@@ -144,6 +166,68 @@ export function createSdkFeishuMessageClient(
       });
     },
   };
+}
+
+async function testSdkFeishuConnection(
+  client: FeishuSdkMessageClientLike,
+  input: FeishuConnectionTestInput,
+  config?: { appId?: string; appSecret?: string }
+): Promise<FeishuConnectionTestResult> {
+  const startedAt = Date.now();
+  const checks: FeishuConnectionCheck[] = [];
+  const tokenApi = client.auth?.v3?.tenantAccessToken?.internal;
+
+  if (!tokenApi) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      checks: [{ name: "tenant_access_token", ok: false, message: "API unavailable" }],
+      error: "Feishu tenant access token API is unavailable.",
+    };
+  }
+
+  try {
+    const response = await tokenApi({
+      data: {
+        app_id: config?.appId,
+        app_secret: config?.appSecret,
+      },
+    });
+    const code = Number(response?.code ?? 0);
+    if (code !== 0) {
+      const message = response?.msg || `Feishu returned code ${code}`;
+      checks.push({ name: "tenant_access_token", ok: false, message });
+      return {
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        checks,
+        error: message,
+      };
+    }
+
+    checks.push({ name: "tenant_access_token", ok: true, message: "ok" });
+    if (input.expectedBotOpenId) {
+      checks.push({
+        name: "bot_open_id",
+        ok: true,
+        message: "configured",
+      });
+    }
+    return {
+      ok: true,
+      latencyMs: Date.now() - startedAt,
+      checks,
+    };
+  } catch (error) {
+    const message = formatError(error);
+    checks.push({ name: "tenant_access_token", ok: false, message });
+    return {
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      checks,
+      error: message,
+    };
+  }
 }
 
 function textMessageData(text: string) {
@@ -171,4 +255,8 @@ function fileTypeFromPath(
   if ([".xls", ".xlsx"].includes(ext)) return "xls";
   if ([".ppt", ".pptx"].includes(ext)) return "ppt";
   return "stream";
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

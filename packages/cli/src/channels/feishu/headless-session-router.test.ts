@@ -221,6 +221,42 @@ describe("FeishuHeadlessSessionRouter", () => {
     );
   });
 
+  test("removes leaked greeting draft before saving and replying", async () => {
+    const outputs: string[] = [];
+    const router = new FeishuHeadlessSessionRouter({
+      model: "cx@gpt-5.5",
+      cwd: "/tmp/project",
+      historyBaseDir: dir,
+      history: {
+        persist: true,
+        maxMessages: 50,
+        nativeResume: true,
+      },
+      createSessionId: () => "11111111-1111-4111-8111-111111111111",
+      runHeadless: async () => ({
+        text:
+          "**Greeting in Chinese**\n\n" +
+          "I'm thinking it's time for a friendly greeting in Chinese! " +
+          "I could say 你好 which means hello. I wonder if the user wants more. " +
+          "I'm excited to share!你好！我在这儿。需要我帮你写代码、看项目、排查问题，还是处理文件？",
+      }),
+      onOutput: (_conversationKey, data) => {
+        outputs.push(typeof data === "string" ? data : Buffer.from(data).toString("utf-8"));
+      },
+    });
+
+    await router.send("dm:ou_1", "你好");
+
+    expect(outputs).toEqual(["你好！我在这儿。需要我帮你写代码、看项目、排查问题，还是处理文件？"]);
+    const lines = readFileSync(join(dir, "dm_ou_1", "messages.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(lines.at(-1).text).toBe(
+      "你好！我在这儿。需要我帮你写代码、看项目、排查问题，还是处理文件？"
+    );
+  });
+
   test("resetSession starts the conversation with a new native session", async () => {
     const calls: FeishuHeadlessRunInput[] = [];
     const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];

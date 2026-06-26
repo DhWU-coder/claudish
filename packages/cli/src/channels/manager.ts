@@ -4,7 +4,7 @@ import { resolveClaudishHome } from "../service/paths.js";
 import { FeishuChannel } from "./feishu/channel.js";
 import { createFeishuSdkClients } from "./feishu/client.js";
 import type { FeishuConfig } from "./feishu/config.js";
-import type { Channel, ChannelStatusSnapshot } from "./types.js";
+import type { Channel, ChannelConnectionTestResult, ChannelStatusSnapshot } from "./types.js";
 
 export interface ChannelManagerOptions {
   channels?: Channel[];
@@ -67,6 +67,25 @@ export class ChannelManager {
     return {
       channels: Array.from(this.channels.values()).map((channel) => channel.getStatus()),
     };
+  }
+
+  async testChannelConnection(id: string): Promise<ChannelConnectionTestResult> {
+    const channel = this.channels.get(id);
+    if (!channel) {
+      return {
+        ok: false,
+        checks: [],
+        error: "Channel not found.",
+      };
+    }
+    if (!channel.testConnection) {
+      return {
+        ok: false,
+        checks: [],
+        error: "Channel does not support connection tests.",
+      };
+    }
+    return channel.testConnection();
   }
 
   async restartChannel(id: string): Promise<boolean> {

@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { CodexOAuth } from "./auth/codex-oauth.js";
+import type { ChannelConnectionTestResult } from "./channels/types.js";
 import {
   type CustomProviderFormat,
   deleteCustomProvider,
@@ -83,6 +84,9 @@ type ChannelStatusProvider = () => {
     [key: string]: unknown;
   }>;
 };
+type ChannelConnectionTester = (
+  channelId: string
+) => Promise<ChannelConnectionTestResult> | ChannelConnectionTestResult;
 
 interface TerminalSocketData {
   provider: string;
@@ -107,6 +111,7 @@ export interface ConfigWebServerOptions {
   terminalWorkingDirectory?: string;
   usageProjectRoot?: string;
   channelStatusProvider?: ChannelStatusProvider;
+  channelConnectionTester?: ChannelConnectionTester;
 }
 
 export interface ConfigWebRequestOptions {
@@ -114,6 +119,7 @@ export interface ConfigWebRequestOptions {
   oauthLogin?: OAuthLoginHandler;
   usageProjectRoot?: string;
   channelStatusProvider?: ChannelStatusProvider;
+  channelConnectionTester?: ChannelConnectionTester;
   localFileOpener?: LocalFileOpener;
 }
 
@@ -228,6 +234,10 @@ function handlePostRequest(
     return handleOpenLocalFilePost(request, options);
   }
 
+  if (url.pathname.startsWith("/api/channels/") && url.pathname.endsWith("/test")) {
+    return handleChannelConnectionTestPost(url, options.channelConnectionTester);
+  }
+
   if (url.pathname === "/api/feishu-config") {
     return handleFeishuConfigPost(request);
   }
@@ -290,6 +300,7 @@ export function startConfigWebServer(
         oauthLogin: options.oauthLogin,
         usageProjectRoot,
         channelStatusProvider: options.channelStatusProvider,
+        channelConnectionTester: options.channelConnectionTester,
         localFileOpener: options.localFileOpener,
       });
     },
@@ -537,6 +548,36 @@ async function handleOpenLocalFilePost(
 
   (options.localFileOpener ?? openLocalFile)(resolvedPath);
   return jsonResponse({ ok: true });
+}
+
+async function handleChannelConnectionTestPost(
+  url: URL,
+  tester: ChannelConnectionTester | undefined
+): Promise<Response> {
+  if (!tester) {
+    return jsonResponse(
+      {
+        ok: false,
+        checks: [],
+        error: "Channel connection test is unavailable.",
+      },
+      503
+    );
+  }
+
+  const channelId = decodeChannelTestId(url);
+  if (!channelId) return jsonResponse({ ok: false, checks: [], error: "Not found" }, 404);
+  const result = await tester(channelId);
+  const status = result.ok ? 200 : result.error === "Channel not found." ? 404 : 500;
+  return jsonResponse(result, status);
+}
+
+function decodeChannelTestId(url: URL): string | undefined {
+  const prefix = "/api/channels/";
+  const suffix = "/test";
+  if (!url.pathname.startsWith(prefix) || !url.pathname.endsWith(suffix)) return undefined;
+  const encoded = url.pathname.slice(prefix.length, -suffix.length);
+  return encoded ? decodeURIComponent(encoded) : undefined;
 }
 
 function feishuFileCacheRoots(options: ConfigWebRequestOptions): string[] {
@@ -1390,6 +1431,17 @@ function renderConfigPage(): string {
         flex-wrap: wrap;
         justify-content: flex-end;
         gap: 8px;
+      }
+      .feishu-connection-test-status {
+        color: var(--muted);
+        font-size: 12px;
+        min-height: 16px;
+      }
+      .feishu-connection-test-status.ok {
+        color: var(--accent-strong);
+      }
+      .feishu-connection-test-status.error {
+        color: var(--danger);
       }
       .feishu-account-fields {
         display: grid;
@@ -2781,6 +2833,7 @@ function renderConfigPage(): string {
       let expandedProviderId = "";
       let providerModelDraft = [];
       let providerModelTestStates = new Map();
+      let feishuConnectionTestStates = new Map();
       let selectedChannelId = "feishu";
       let editingFeishuAccountIndexes = new Set();
       let newFeishuAccountIndexes = new Set();
@@ -2855,6 +2908,10 @@ function renderConfigPage(): string {
           "feishuConfig.botOpenId": "Bot open_id",
           "feishuConfig.domain": "Domain",
           "feishuConfig.readonly": "Restart-only fields",
+          "feishuConfig.testConnection": "Test",
+          "feishuConfig.testingConnection": "Testing...",
+          "feishuConfig.connectionSuccess": "OK {ms} ms",
+          "feishuConfig.connectionFailure": "Failed: {message}",
           "feishuConfig.remove": "Remove",
           "providers.current": "Current Providers",
           "providers.title": "Providers",
@@ -3060,6 +3117,10 @@ function renderConfigPage(): string {
           "feishuConfig.botOpenId": "机器人 open_id",
           "feishuConfig.domain": "域",
           "feishuConfig.readonly": "需重启字段",
+          "feishuConfig.testConnection": "测试连接",
+          "feishuConfig.testingConnection": "测试中...",
+          "feishuConfig.connectionSuccess": "连接正常 {ms} ms",
+          "feishuConfig.connectionFailure": "连接失败：{message}",
           "feishuConfig.remove": "移除",
           "providers.current": "当前 Provider",
           "providers.title": "Provider",
@@ -4289,10 +4350,17 @@ function renderConfigPage(): string {
           account.model || "-",
           account.cwd || "-",
         ].join(" · ");
-        titleWrap.append(title, meta);
+        const connectionStatus = renderFeishuConnectionTestStatus(account);
+        titleWrap.append(title, meta, connectionStatus);
 
         const actions = document.createElement("div");
         actions.className = "feishu-account-actions";
+        const testConnection = document.createElement("button");
+        testConnection.className = "ghost feishu-connection-test";
+        testConnection.type = "button";
+        testConnection.textContent = t("feishuConfig.testConnection");
+        testConnection.disabled = isEditing;
+        testConnection.addEventListener("click", () => testFeishuConnection(account));
         const edit = document.createElement("button");
         edit.className = "ghost";
         edit.type = "button";
@@ -4318,6 +4386,7 @@ function renderConfigPage(): string {
         if (isEditing) {
           actions.append(cancel, save, remove);
         } else {
+          actions.append(testConnection);
           actions.append(edit, remove);
         }
         head.append(titleWrap, actions);
@@ -4356,6 +4425,66 @@ function renderConfigPage(): string {
           createFeishuAccountSessions(account, sessions)
         );
         return card;
+      }
+
+      function feishuAccountChannelId(account) {
+        const accountId = String(account?.id || "default").trim();
+        return !accountId || accountId === "default" ? "feishu" : "feishu:" + accountId;
+      }
+
+      function renderFeishuConnectionTestStatus(account) {
+        const channelId = feishuAccountChannelId(account);
+        const state = feishuConnectionTestStates.get(channelId);
+        const status = document.createElement("span");
+        status.className = "feishu-connection-test-status";
+        if (!state) return status;
+
+        if (state.testing) {
+          status.textContent = t("feishuConfig.testingConnection");
+          return status;
+        }
+
+        const result = state.result || {};
+        if (result.ok) {
+          status.classList.add("ok");
+          status.textContent = t("feishuConfig.connectionSuccess", {
+            ms: String(Math.max(0, Math.round(Number(result.latencyMs || 0)))),
+          });
+          return status;
+        }
+
+        status.classList.add("error");
+        status.textContent = t("feishuConfig.connectionFailure", {
+          message: result.error || "-",
+        });
+        return status;
+      }
+
+      async function testFeishuConnection(account) {
+        const channelId = feishuAccountChannelId(account);
+        feishuConnectionTestStates.set(channelId, { testing: true });
+        renderFeishuConfig(feishuConfigState);
+        try {
+          const response = await fetch(
+            "/api/channels/" + encodeURIComponent(channelId) + "/test",
+            { method: "POST" }
+          );
+          const result = await response.json();
+          feishuConnectionTestStates.set(channelId, {
+            testing: false,
+            result: response.ok ? result : { ...result, ok: false },
+          });
+        } catch (err) {
+          feishuConnectionTestStates.set(channelId, {
+            testing: false,
+            result: {
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+              checks: [],
+            },
+          });
+        }
+        renderFeishuConfig(feishuConfigState);
       }
 
       function createFeishuSecretInput(account, disabled) {

@@ -819,6 +819,80 @@ describe("FeishuChannel", () => {
     expect(replies).toEqual(["om_1:已停止当前会话。"]);
   });
 
+  test("slash status replies with current conversation status without routing to model", async () => {
+    const routed: string[] = [];
+    const replies: string[] = [];
+    const channel = new FeishuChannel({
+      config: configuredConfig({ id: "donghao" }),
+      messageClient: {
+        async replyText(input) {
+          replies.push(input.text);
+        },
+        async sendText() {},
+      },
+      sessionRouter: {
+        async send(_conversationKey, text) {
+          routed.push(text);
+        },
+        listSessions: () => [
+          {
+            conversationKey: "group:oc_group",
+            pid: 123,
+            status: "running",
+          },
+        ],
+        stopAll() {},
+      },
+    });
+
+    await channel.handleEvent(textPayload('<at user_id="ou_bot">bot</at> /status'));
+    await delay(5);
+
+    expect(routed).toEqual([]);
+    expect(replies[0]).toContain("状态：");
+    expect(replies[0]).toContain("账号：donghao");
+    expect(replies[0]).toContain("会话：group:oc_group");
+    expect(replies[0]).toContain("模型：cx@gpt-5.5");
+    expect(replies[0]).toContain(`工作目录：${cwd}`);
+    expect(replies[0]).toContain("运行中");
+  });
+
+  test("testConnection delegates to message client and reports disabled accounts", async () => {
+    const channel = new FeishuChannel({
+      config: configuredConfig({ id: "donghao" }),
+      messageClient: {
+        async replyText() {},
+        async sendText() {},
+        async testConnection(input) {
+          return {
+            ok: true,
+            latencyMs: 12,
+            checks: [
+              {
+                name: "tenant_access_token",
+                ok: true,
+                message: input.expectedBotOpenId,
+              },
+            ],
+          };
+        },
+      },
+    });
+    const disabled = new FeishuChannel({
+      config: configuredConfig({ enabled: false }),
+    });
+
+    await expect(channel.testConnection()).resolves.toEqual({
+      ok: true,
+      latencyMs: 12,
+      checks: [{ name: "tenant_access_token", ok: true, message: "ou_bot" }],
+    });
+    await expect(disabled.testConnection()).resolves.toMatchObject({
+      ok: false,
+      error: "Feishu account is disabled.",
+    });
+  });
+
   test("group event without mention is ignored", async () => {
     const routed: string[] = [];
     const channel = new FeishuChannel({

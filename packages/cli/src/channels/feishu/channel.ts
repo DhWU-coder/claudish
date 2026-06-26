@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { basename } from "node:path";
 import type { FeishuConfig } from "./config.js";
+import { sanitizeFeishuLeakedDraftText } from "./draft-sanitizer.js";
 import {
   type FeishuMessageEvent,
   buildClaudeCodeInputForFeishu,
@@ -22,7 +23,12 @@ import {
   extractFeishuReturnFileDirectives,
   resolveFeishuReturnFile,
 } from "./return-files.js";
-import { type FeishuMessageClient, sendFeishuFile, sendFeishuText } from "./send.js";
+import {
+  type FeishuConnectionTestResult,
+  type FeishuMessageClient,
+  sendFeishuFile,
+  sendFeishuText,
+} from "./send.js";
 import {
   type FeishuRoutedSessionStatus,
   FeishuSessionRouter,
@@ -160,6 +166,29 @@ export class FeishuChannel {
       recentMessages: this.messageTracker.list(),
       recentSessions: this.messageTracker.listSessions(),
     };
+  }
+
+  async testConnection(): Promise<FeishuConnectionTestResult> {
+    const startedAt = this.now();
+    if (!this.config.enabled) {
+      return {
+        ok: false,
+        latencyMs: this.now() - startedAt,
+        checks: [],
+        error: "Feishu account is disabled.",
+      };
+    }
+    if (!this.messageClient?.testConnection) {
+      return {
+        ok: false,
+        latencyMs: this.now() - startedAt,
+        checks: [],
+        error: "Feishu connection test is unavailable.",
+      };
+    }
+    return this.messageClient.testConnection({
+      expectedBotOpenId: this.config.botOpenId,
+    });
   }
 
   async handleEvent(payload: unknown): Promise<void> {
@@ -467,7 +496,7 @@ export class FeishuChannel {
   ): void {
     if (!this.messageClient) return;
 
-    const cleanText = sanitizeFeishuAssistantProgressText(text);
+    const cleanText = sanitizeFeishuLeakedDraftText(text, { dropWhenNoReply: true });
     if (!cleanText) return;
 
     const relayKey = this.outputRelayKey(conversationKey, context);
@@ -510,10 +539,34 @@ export class FeishuChannel {
       return;
     }
 
+    if (command.type === "status") {
+      await this.replyCommand(this.buildStatusReply(conversationKey), replyToMessageId);
+      this.messageTracker.update(messageId, { stage: "completed" });
+      return;
+    }
+
     this.sessionRouter.stopSession?.(conversationKey);
     this.disposeRelay(conversationKey);
     await this.replyCommand("已停止当前会话。", replyToMessageId);
     this.messageTracker.update(messageId, { stage: "stopped" });
+  }
+
+  private buildStatusReply(conversationKey: string): string {
+    const sessions = this.sessionRouter.listSessions();
+    const session = sessions.find((item) => item.conversationKey === conversationKey);
+    const isRunning = session?.status === "running";
+    const recentMessages = this.messageTracker
+      .list()
+      .filter((message) => message.conversationKey === conversationKey);
+
+    return [
+      `状态：${isRunning ? "运行中" : "空闲"}`,
+      `账号：${this.config.id || "default"}`,
+      `会话：${conversationKey}`,
+      `模型：${this.config.model}`,
+      `工作目录：${this.config.cwd}`,
+      `最近消息：${recentMessages.length}`,
+    ].join("\n");
   }
 
   private async replyCommand(text: string, replyToMessageId: string | undefined): Promise<void> {
@@ -629,6 +682,7 @@ type FeishuCommand =
   | { type: "new" }
   | { type: "clear" }
   | { type: "stop" }
+  | { type: "status" }
   | { type: "file"; path: string };
 
 function parseFeishuCommand(text: string): FeishuCommand | null {
@@ -636,6 +690,7 @@ function parseFeishuCommand(text: string): FeishuCommand | null {
   if (command === "/new") return { type: "new" };
   if (command === "/clear") return { type: "clear" };
   if (command === "/stop") return { type: "stop" };
+  if (command === "/status") return { type: "status" };
   const file = text.trim().match(/^\/(?:file|sendfile)\s+(.+)$/i);
   if (file) return { type: "file", path: file[1].trim() };
   return null;
@@ -685,32 +740,3 @@ function formatProgressPayload(input: unknown): string {
     return String(input);
   }
 }
-
-function sanitizeFeishuAssistantProgressText(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed || !startsWithLeakedProgressDraft(trimmed)) return trimmed;
-
-  const firstChinese = trimmed.search(/[\u3400-\u9fff]/);
-  if (firstChinese < 0) return "";
-
-  return trimmed.slice(firstChinese).trim();
-}
-
-function startsWithLeakedProgressDraft(text: string): boolean {
-  if (!/^\*\*[A-Za-z][A-Za-z0-9\s:;,'".!?/-]{3,100}\*\*/.test(text)) return false;
-
-  const head = text.slice(0, 1000).replace(/\s+/g, " ").toLowerCase();
-  return PROGRESS_DRAFT_LEAKAGE_MARKERS.some((marker) => head.includes(marker));
-}
-
-const PROGRESS_DRAFT_LEAKAGE_MARKERS = [
-  "i need to",
-  "i should",
-  "i suspect",
-  "maybe i",
-  "i'm planning",
-  "i will verify",
-  "i'll write",
-  "it feels like",
-  "the user requested",
-];

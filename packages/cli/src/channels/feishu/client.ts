@@ -59,7 +59,10 @@ export function createFeishuSdkClients(config: FeishuConfig): FeishuSdkClients {
   return {
     eventClient: createFeishuEventClient(wsClient),
     mediaClient: createFeishuMediaClient(client),
-    messageClient: createSdkFeishuMessageClient(client),
+    messageClient: createSdkFeishuMessageClient(client, {
+      appId: config.appId,
+      appSecret: config.appSecret,
+    }),
     reactionClient: createSdkFeishuReactionClient(client),
   };
 }

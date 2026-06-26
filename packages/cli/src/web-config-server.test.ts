@@ -367,6 +367,21 @@ describe("web config server", () => {
     expect(html).not.toContain("actions.append(edit, save, remove)");
   });
 
+  test("GET / renders Feishu connection test controls", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+
+    expect(html).toContain("testFeishuConnection");
+    expect(html).toContain("renderFeishuConnectionTestStatus");
+    expect(html).toContain("feishu-connection-test");
+    expect(html).toContain("/api/channels/");
+    expect(html).toContain("/test");
+    expect(html).toContain('"feishuConfig.testConnection"');
+    expect(html).toContain('"feishuConfig.testingConnection"');
+    expect(html).toContain('"feishuConfig.connectionSuccess"');
+    expect(html).toContain('"feishuConfig.connectionFailure"');
+  });
+
   test("GET / renders terminal restart behavior for model changes", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -597,6 +612,42 @@ describe("web config server", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       channels: [{ id: "feishu", status: "connected", activeSessions: 1 }],
+    });
+  });
+
+  test("POST /api/channels/:id/test returns Feishu connection test result", async () => {
+    const response = await handleConfigWebRequest(
+      request("/api/channels/feishu%3Awudonghao/test", { method: "POST" }),
+      {
+        channelConnectionTester: async (channelId) => ({
+          ok: channelId === "feishu:wudonghao",
+          latencyMs: 23,
+          checks: [{ name: "tenant_access_token", ok: true }],
+        }),
+      }
+    );
+    const missing = await handleConfigWebRequest(
+      request("/api/channels/feishu%3Amissing/test", { method: "POST" }),
+      {
+        channelConnectionTester: async () => ({
+          ok: false,
+          error: "Channel not found.",
+          checks: [],
+        }),
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      latencyMs: 23,
+      checks: [{ name: "tenant_access_token", ok: true }],
+    });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({
+      ok: false,
+      error: "Channel not found.",
+      checks: [],
     });
   });
 

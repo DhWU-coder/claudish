@@ -1,6 +1,7 @@
 import { mkdirSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
 import { ChannelManager } from "../channels/manager.js";
+import type { ChannelConnectionTestResult } from "../channels/types.js";
 import { type ConfigWebServerOptions, startConfigWebServer } from "../web-config-server.js";
 import { type ClaudishConfig, ensureWorkingDirectory, loadClaudishConfig } from "./config.js";
 import { getClaudishConfigPath, getServiceLogPath } from "./paths.js";
@@ -22,6 +23,9 @@ export interface ServiceChannelManager {
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
   reloadConfig?(config: ClaudishConfig): Promise<unknown> | unknown;
+  testChannelConnection?(
+    id: string
+  ): Promise<ChannelConnectionTestResult> | ChannelConnectionTestResult;
   getStatus(): ChannelStatusSnapshot;
 }
 
@@ -101,6 +105,12 @@ export async function startServiceDaemon(
     openBrowser: false,
     terminalWorkingDirectory: cwd,
     channelStatusProvider: () => channelManager.getStatus(),
+    channelConnectionTester: (channelId) =>
+      channelManager.testChannelConnection?.(channelId) ?? {
+        ok: false,
+        checks: [],
+        error: "Channel connection test is unavailable.",
+      },
   } as ConfigWebServerOptions) as ServiceWebServer;
   const state = buildDaemonState({
     cwd,

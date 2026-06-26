@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { FeishuHistoryConfig } from "./config.js";
+import { sanitizeFeishuLeakedDraftText } from "./draft-sanitizer.js";
 import {
   type FeishuHeadlessProgressEvent,
   type FeishuHeadlessRunInput,
@@ -173,7 +174,7 @@ export class FeishuHeadlessSessionRouter {
       if (!resume || !this.history.persist) throw error;
       resultText = await this.runWithJsonlFallback(routed, text, abortController.signal, context);
     }
-    resultText = sanitizeFeishuAssistantText(resultText);
+    resultText = sanitizeFeishuLeakedDraftText(resultText);
 
     if (this.sessions.get(routed.conversationKey) !== routed) return;
     routed.abortController = undefined;
@@ -300,32 +301,3 @@ const RETURN_FILE_INSTRUCTIONS = [
   "",
   "这行不会展示给用户，系统会解析并发送对应文件。",
 ].join("\n");
-
-function sanitizeFeishuAssistantText(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed || !startsWithLeakedDraft(trimmed)) return trimmed;
-
-  const firstChinese = trimmed.search(/[\u3400-\u9fff]/);
-  if (firstChinese < 0) return trimmed;
-
-  const cleaned = trimmed.slice(firstChinese).trim();
-  return cleaned || trimmed;
-}
-
-function startsWithLeakedDraft(text: string): boolean {
-  if (!/^\*\*[A-Za-z][A-Za-z0-9\s:;,'".!?/-]{3,100}\*\*/.test(text)) return false;
-
-  const head = text.slice(0, 800).replace(/\s+/g, " ").toLowerCase();
-  return DRAFT_LEAKAGE_MARKERS.some((marker) => head.includes(marker));
-}
-
-const DRAFT_LEAKAGE_MARKERS = [
-  "i need to",
-  "i should",
-  "i suspect",
-  "it feels like",
-  "the tool displayed",
-  "base64 format",
-  "there's definitely",
-  "there is definitely",
-];
