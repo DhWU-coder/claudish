@@ -79,18 +79,23 @@ Claudish is a **BYOK AI coding assistant**:
 
 ## Installation
 
-### Quick Install
+> This repository's version is not published to npm. `npm install -g claudish`, `bun install -g claudish`, `npx claudish`, and `bunx claudish` use the public upstream package from `MadAppGang/claudish`, not this repository's version.
+
+### Install from Source
 
 ```bash
-# npm
-npm install -g claudish
-
-# Bun
-bun install -g claudish
+git clone https://github.com/DhWU-coder/claudish.git
+cd claudish
+bun install
+bun run --cwd packages/cli build
+cd packages/cli
+bun link
+claudish --version
 ```
 
 ### Prerequisites
 
+- [Bun](https://bun.sh/) 1.0 or later
 - [Claude Code](https://claude.com/claude-code) - Claude CLI must be installed
 - At least one API key:
   - [OpenRouter API Key](https://openrouter.ai/keys) - Access 100+ models (free tier available)
@@ -98,23 +103,6 @@ bun install -g claudish
   - [OpenAI API Key](https://platform.openai.com/api-keys) - For direct OpenAI access
   - [OllamaCloud API Key](https://ollama.com/account) - For cloud-hosted Ollama models (`oc/` prefix)
   - Or local models (Ollama, LM Studio) - No API key needed
-
-### Other Install Options
-
-**Use without installing:**
-
-```bash
-npx claudish@latest --model x-ai/grok-code-fast-1 "your prompt"
-bunx claudish@latest --model x-ai/grok-code-fast-1 "your prompt"
-```
-
-**Install from source:**
-
-```bash
-git clone https://github.com/DhWU-coder/claudish.git
-cd claudish
-bun install && bun run build && bun link
-```
 
 ## Quick Start
 

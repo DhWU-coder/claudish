@@ -60,22 +60,7 @@ claudish --model ollama@qwen3-coder:latest "你的任务"
 
 ## 安装
 
-### 快速安装
-
-```bash
-# npm
-npm install -g claudish
-
-# Bun
-bun install -g claudish
-```
-
-### 免安装运行
-
-```bash
-npx claudish@latest --model cx@gpt-5.5 "你的任务"
-bunx claudish@latest --model cx@gpt-5.5 "你的任务"
-```
+> 本仓库版本未发布到 npm。`npm install -g claudish`、`bun install -g claudish`、`npx claudish` 和 `bunx claudish` 使用的是上游 `MadAppGang/claudish` 的公开包，并非本仓库版本。
 
 ### 从源码安装
 
@@ -84,11 +69,14 @@ git clone https://github.com/DhWU-coder/claudish.git
 cd claudish
 bun install
 bun run --cwd packages/cli build
+cd packages/cli
 bun link
+claudish --version
 ```
 
 ## 前置要求
 
+- 已安装 [Bun](https://bun.sh/) 1.0 或更高版本
 - 已安装 [Claude Code](https://claude.com/claude-code)
 - 至少配置一种可用的模型来源：
   - OpenRouter API Key
@@ -505,15 +493,13 @@ claudish --version
 
 ### `claudish: command not found`
 
-说明命令没有安装到 PATH。可以：
+说明源码版本尚未构建或命令没有链接到 PATH。请在仓库根目录执行：
 
 ```bash
-npm install -g claudish
-# 或
-bun install -g claudish
-# 或在源码目录
 bun run --cwd packages/cli build
+cd packages/cli
 bun link
+claudish --version
 ```
 
 ### `Claude Code CLI is not installed`
