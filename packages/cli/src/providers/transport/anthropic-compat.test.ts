@@ -51,7 +51,7 @@ describe("AnthropicCompatProvider.getHeaders()", () => {
     const headers = await transport.getHeaders();
 
     expect(headers["x-api-key"]).toBe(TEST_API_KEY);
-    expect(headers["Authorization"]).toBeUndefined();
+    expect(headers.Authorization).toBeUndefined();
     expect(headers["anthropic-version"]).toBe("2023-06-01");
   });
 
@@ -70,6 +70,24 @@ describe("AnthropicCompatProvider.getHeaders()", () => {
 
     expect(headers["x-api-key"]).toBe(TEST_API_KEY);
     expect(headers["Authorization"]).toBeUndefined();
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+  });
+
+  it("omits authentication headers when the API key is empty", async () => {
+    const provider: RemoteProvider = {
+      name: "local-anthropic",
+      baseUrl: "http://127.0.0.1:8000",
+      apiPath: "/v1/messages",
+      apiKeyEnvVar: "",
+      prefixes: [],
+      authScheme: "x-api-key",
+    };
+
+    const transport = new AnthropicCompatProvider(provider, "");
+    const headers = await transport.getHeaders();
+
+    expect(headers["x-api-key"]).toBeUndefined();
+    expect(headers.Authorization).toBeUndefined();
     expect(headers["anthropic-version"]).toBe("2023-06-01");
   });
 });

@@ -62,15 +62,15 @@ describe("CustomEndpointSimpleSchema", () => {
     ).toThrow();
   });
 
-  test("rejects an empty `apiKey`", () => {
-    expect(() =>
-      CustomEndpointSimpleSchema.parse({
-        kind: "simple",
-        url: "https://api.example.com",
-        format: "openai",
-        apiKey: "",
-      })
-    ).toThrow();
+  test("accepts an empty `apiKey` for unauthenticated endpoints", () => {
+    const parsed = CustomEndpointSimpleSchema.parse({
+      kind: "simple",
+      url: "https://api.example.com",
+      format: "openai",
+      apiKey: "",
+    });
+
+    expect(parsed.apiKey).toBe("");
   });
 });
 

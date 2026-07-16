@@ -38,10 +38,12 @@ export class AnthropicProviderTransport implements ProviderTransport {
       "anthropic-version": "2023-06-01",
     };
 
-    if (this.provider.authScheme === "bearer") {
-      headers["Authorization"] = `Bearer ${this.apiKey}`;
-    } else {
-      headers["x-api-key"] = this.apiKey;
+    if (this.apiKey) {
+      if (this.provider.authScheme === "bearer") {
+        headers.Authorization = `Bearer ${this.apiKey}`;
+      } else {
+        headers["x-api-key"] = this.apiKey;
+      }
     }
 
     // Add provider-specific headers

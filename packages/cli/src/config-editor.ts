@@ -24,6 +24,24 @@ import {
 
 export type CustomProviderFormat = "openai" | "anthropic" | "gemini";
 
+export type ConfigEditorValidationErrorCode =
+  | "provider_id_required"
+  | "provider_id_invalid"
+  | "provider_id_builtin"
+  | "base_url_invalid"
+  | "base_url_protocol_invalid";
+
+/** 为不同交互界面提供稳定错误码，同时保留兼容的错误消息。 */
+export class ConfigEditorValidationError extends Error {
+  constructor(
+    readonly code: ConfigEditorValidationErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "ConfigEditorValidationError";
+  }
+}
+
 export type EffectiveValueSource =
   | "cli-flag"
   | "env-var"
@@ -42,7 +60,8 @@ export interface SimpleCustomProviderInput {
   providerId: string;
   format: CustomProviderFormat;
   baseUrl: string;
-  apiKey: string;
+  /** 未提供表示保留已有 key；显式空字符串表示清除已有 key。 */
+  apiKey?: string;
   defaultModel?: string;
   models?: string[] | string;
 }
@@ -120,13 +139,19 @@ export function normalizeCustomProviderId(providerId: string): string {
 export function assertValidCustomProviderId(providerId: string): string {
   const normalized = normalizeCustomProviderId(providerId);
   if (!normalized) {
-    throw new Error("provider-id is required");
+    throw new ConfigEditorValidationError("provider_id_required", "provider-id is required");
   }
   if (!/^[a-z][a-z0-9_-]*$/.test(normalized)) {
-    throw new Error("Use lowercase letters, numbers, '-' or '_', and start with a letter");
+    throw new ConfigEditorValidationError(
+      "provider_id_invalid",
+      "Use lowercase letters, numbers, '-' or '_', and start with a letter"
+    );
   }
   if (getProviderByName(normalized)) {
-    throw new Error(`Provider '${normalized}' is already built in; choose another provider-id`);
+    throw new ConfigEditorValidationError(
+      "provider_id_builtin",
+      `Provider '${normalized}' is already built in; choose another provider-id`
+    );
   }
   return normalized;
 }
@@ -140,11 +165,17 @@ export function normalizeEndpointUrl(baseUrl: string): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error("Enter a valid base_url, for example https://api.example.com/v1");
+    throw new ConfigEditorValidationError(
+      "base_url_invalid",
+      "Enter a valid base_url, for example https://api.example.com/v1"
+    );
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("base_url must start with http:// or https://");
+    throw new ConfigEditorValidationError(
+      "base_url_protocol_invalid",
+      "base_url must start with http:// or https://"
+    );
   }
 
   return trimmed.replace(/\/+$/, "");
@@ -189,12 +220,9 @@ export function getCustomProviderSecret(providerId: string): string | undefined 
  */
 export function saveSimpleCustomProvider(input: SimpleCustomProviderInput): ClaudishProfileConfig {
   const providerId = assertValidCustomProviderId(input.providerId);
-  const apiKey = input.apiKey.trim();
+  const apiKey = input.apiKey?.trim();
   const config = loadConfig();
   const existingApiKey = readExistingCustomProviderApiKey(config, providerId);
-  if (!apiKey && !existingApiKey) {
-    throw new Error("api-key is required");
-  }
 
   const defaultModel = input.defaultModel?.trim() ?? "";
   const models = normalizeProviderModels(input.models, defaultModel);
@@ -204,7 +232,7 @@ export function saveSimpleCustomProvider(input: SimpleCustomProviderInput): Clau
       kind: "simple",
       url: normalizeEndpointUrl(input.baseUrl),
       format: input.format,
-      apiKey: apiKey || existingApiKey,
+      apiKey: apiKey ?? existingApiKey ?? "",
       ...(defaultModel ? { defaultModel } : {}),
       ...(models.length > 0 ? { models } : {}),
     },
@@ -228,7 +256,7 @@ export function saveBuiltinProviderModels(
 
   const summaryId = provider.shortestPrefix || provider.name;
   const defaultModel = input.defaultModel?.trim() ?? "";
-  const apiKey = input.apiKey?.trim() ?? "";
+  const apiKey = input.apiKey?.trim();
   const models = normalizeProviderModels(input.models, defaultModel);
   const config = loadConfig();
   const nextModels = { ...(config.builtinProviderModels ?? {}) };
@@ -236,11 +264,8 @@ export function saveBuiltinProviderModels(
   if (models.length > 0) nextModels[summaryId] = models;
   else delete nextModels[summaryId];
 
-  // Builtin API-key providers keep their transport fixed, but a typed key can
-  // still refresh the stored credential used by the transport.
-  if (apiKey && provider.apiKeyEnvVar) {
-    config.apiKeys = { ...(config.apiKeys ?? {}), [provider.apiKeyEnvVar]: apiKey };
-  }
+  // 内置 API-key Provider 的传输方式固定，但三态输入仍可保留、替换或清除配置文件中的凭据。
+  updateBuiltinApiKey(config, provider, apiKey);
 
   config.builtinProviderModels = Object.keys(nextModels).length > 0 ? nextModels : undefined;
   saveConfig(config);
@@ -720,6 +745,23 @@ function builtinCredentialSource(
  */
 function builtinApiKeyEnvVars(provider: ProviderDefinition): string[] {
   return [provider.apiKeyEnvVar, ...(provider.apiKeyAliases ?? [])].filter(Boolean);
+}
+
+/** 按三态语义更新内置 Provider 的配置文件 key。 */
+function updateBuiltinApiKey(
+  config: ClaudishProfileConfig,
+  provider: ProviderDefinition,
+  apiKey: string | undefined
+): void {
+  if (apiKey === undefined || !provider.apiKeyEnvVar) return;
+
+  const nextApiKeys = { ...(config.apiKeys ?? {}) };
+  if (apiKey) {
+    nextApiKeys[provider.apiKeyEnvVar] = apiKey;
+  } else {
+    for (const envVar of builtinApiKeyEnvVars(provider)) delete nextApiKeys[envVar];
+  }
+  config.apiKeys = Object.keys(nextApiKeys).length > 0 ? nextApiKeys : undefined;
 }
 
 /**

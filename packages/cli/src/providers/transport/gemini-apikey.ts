@@ -8,10 +8,10 @@
  * - gemini-sse stream format
  */
 
-import type { ProviderTransport, StreamFormat } from "./types.js";
-import type { RemoteProvider } from "../../handlers/shared/remote-provider-types.js";
 import { GeminiRequestQueue } from "../../handlers/shared/gemini-queue.js";
+import type { RemoteProvider } from "../../handlers/shared/remote-provider-types.js";
 import { log } from "../../logger.js";
+import type { ProviderTransport, StreamFormat } from "./types.js";
 
 export class GeminiProviderTransport implements ProviderTransport {
   readonly name = "gemini";
@@ -34,9 +34,7 @@ export class GeminiProviderTransport implements ProviderTransport {
   }
 
   async getHeaders(): Promise<Record<string, string>> {
-    return {
-      "x-goog-api-key": this.apiKey,
-    };
+    return this.apiKey ? { "x-goog-api-key": this.apiKey } : {};
   }
 
   /**

@@ -46,10 +46,7 @@ export class LiteLLMProviderTransport implements ProviderTransport {
   }
 
   async getHeaders(): Promise<Record<string, string>> {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-    };
-    return headers;
+    return this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {};
   }
 
   getExtraPayloadFields(): Record<string, any> {

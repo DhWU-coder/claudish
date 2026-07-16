@@ -148,6 +148,21 @@ describe("config editor", () => {
     expect(openrouter?.apiKey).toBe("new-key");
   });
 
+  test("saveBuiltinProviderModels clears a saved API key when the input is explicitly empty", () => {
+    saveConfig({
+      ...loadConfig(),
+      apiKeys: { OPENROUTER_API_KEY: "old-key" },
+    });
+
+    saveBuiltinProviderModels({
+      providerId: "or",
+      apiKey: "",
+      defaultModel: "openai/gpt-5",
+    });
+
+    expect(loadConfig().apiKeys?.OPENROUTER_API_KEY).toBeUndefined();
+  });
+
   test("deleteCustomProvider clears builtin OAuth credentials without disabling the provider", () => {
     const oauthPath = join(process.env.CLAUDISH_HOME!, "codex-oauth.json");
     mkdirSync(process.env.CLAUDISH_HOME!, { recursive: true });
@@ -245,9 +260,34 @@ describe("config editor", () => {
     });
   });
 
-  test("saveSimpleCustomProvider keeps an existing api key when editing with an empty key", () => {
-    // Provider edits from the Web UI should not erase a saved secret when the
-    // masked key field is left blank.
+  test("saveSimpleCustomProvider keeps an existing api key when editing without an apiKey field", () => {
+    // Web UI 编辑时，如果掩码 key 没有被触碰，就不提交这个字段。
+    saveSimpleCustomProvider({
+      providerId: "corp-openai",
+      format: "openai",
+      baseUrl: "https://old.example.com/v1",
+      apiKey: "sk-existing",
+      defaultModel: "gpt-4o",
+    });
+
+    saveSimpleCustomProvider({
+      providerId: "corp-openai",
+      format: "anthropic",
+      baseUrl: "https://new.example.com/v1",
+      defaultModel: "claude-opus-4-7",
+    });
+
+    expect(loadConfig().customEndpoints?.["corp-openai"]).toEqual({
+      kind: "simple",
+      url: "https://new.example.com/v1",
+      format: "anthropic",
+      apiKey: "sk-existing",
+      defaultModel: "claude-opus-4-7",
+      models: ["claude-opus-4-7"],
+    });
+  });
+
+  test("saveSimpleCustomProvider clears an existing api key when the input is explicitly empty", () => {
     saveSimpleCustomProvider({
       providerId: "corp-openai",
       format: "openai",
@@ -264,14 +304,7 @@ describe("config editor", () => {
       defaultModel: "claude-opus-4-7",
     });
 
-    expect(loadConfig().customEndpoints?.["corp-openai"]).toEqual({
-      kind: "simple",
-      url: "https://new.example.com/v1",
-      format: "anthropic",
-      apiKey: "sk-existing",
-      defaultModel: "claude-opus-4-7",
-      models: ["claude-opus-4-7"],
-    });
+    expect(loadConfig().customEndpoints?.["corp-openai"]?.apiKey).toBe("");
   });
 
   test("getConfigEditorState directly migrates legacy provider models", () => {

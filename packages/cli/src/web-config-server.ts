@@ -11,6 +11,7 @@ import { join, resolve, sep } from "node:path";
 import { CodexOAuth } from "./auth/codex-oauth.js";
 import type { ChannelConnectionTestResult } from "./channels/types.js";
 import {
+  ConfigEditorValidationError,
   type CustomProviderFormat,
   deleteCustomProvider,
   getConfigEditorState,
@@ -135,7 +136,14 @@ export async function handleConfigWebRequest(
   try {
     return await dispatchConfigWebRequest(request, url, options);
   } catch (err) {
-    return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 400);
+    const error = err instanceof Error ? err : new Error(String(err));
+    return jsonResponse(
+      {
+        error: error.message,
+        ...(error instanceof ConfigEditorValidationError ? { code: error.code } : {}),
+      },
+      400
+    );
   }
 }
 
@@ -485,7 +493,7 @@ async function handleCustomProviderPost(request: Request): Promise<Response> {
     providerId: body.providerId ?? "",
     format: body.format ?? "openai",
     baseUrl: body.baseUrl ?? "",
-    apiKey: body.apiKey ?? "",
+    apiKey: body.apiKey,
     defaultModel: body.defaultModel ?? "",
     models: body.models ?? "",
   });
@@ -504,7 +512,7 @@ async function handleBuiltinProviderPost(request: Request, url: URL): Promise<Re
   }>(request);
   saveBuiltinProviderModels({
     providerId,
-    apiKey: body.apiKey ?? "",
+    apiKey: body.apiKey,
     defaultModel: body.defaultModel ?? "",
     models: body.models ?? "",
   });
@@ -1584,6 +1592,19 @@ function renderConfigPage(): string {
       }
       .provider-editor-models {
         min-height: 0;
+      }
+      .provider-form-error {
+        margin: 14px 0 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--danger);
+        border-radius: 6px;
+        background: var(--danger-soft);
+        color: var(--danger);
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+      .provider-form-error[hidden] {
+        display: none;
       }
       .modal-actions {
         display: flex;
@@ -2762,13 +2783,13 @@ function renderConfigPage(): string {
           <button class="ghost" id="provider-close" type="button" aria-label="Close provider editor" data-i18n="common.close" data-i18n-aria-label="aria.closeProviderEditor">Close</button>
         </div>
         <div class="modal-body">
-          <form id="provider-form">
+          <form id="provider-form" autocomplete="off">
             <div class="provider-editor-grid">
               <!-- Provider connection fields stay together so OAuth modes can hide credentials cleanly. -->
               <div class="provider-editor-info">
                 <label>
                   <span data-i18n="providerModal.providerId">Provider ID</span>
-                  <input id="provider-id" name="providerId" placeholder="corp-openai" required />
+                  <input id="provider-id" name="providerId" placeholder="corp-openai" autocomplete="off" required />
                 </label>
                 <label id="provider-format-field">
                   <span data-i18n="providerModal.compatibleType">Compatible type</span>
@@ -2780,14 +2801,15 @@ function renderConfigPage(): string {
                 </label>
                 <label id="provider-url-field">
                   <span data-i18n="providerModal.baseUrl">Base URL</span>
-                  <input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" required />
+                  <input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" autocomplete="off" required />
                 </label>
                 <label id="provider-key-field">
                   <span data-i18n="providerModal.apiKey">API key</span>
                   <div class="secret-field">
-                    <input id="provider-key" name="apiKey" type="password" placeholder="sk-... or &#36;{ENV_VAR}" autocomplete="off" />
+                    <input id="provider-key" name="apiKey" type="password" placeholder="sk-... or &#36;{ENV_VAR}" autocomplete="new-password" />
                     <button class="secret-toggle" id="provider-key-toggle" type="button" aria-label="Show API key" data-i18n-aria-label="aria.showApiKey"></button>
                   </div>
+                  <span class="field-help" data-i18n="providerModal.keepKey">Optional for unauthenticated or local endpoints. Clear the field to remove the saved key.</span>
                 </label>
               </div>
               <!-- Model controls live in their own column so long model lists do not crowd credentials. -->
@@ -2811,6 +2833,7 @@ function renderConfigPage(): string {
                 </div>
               </div>
             </div>
+            <p class="provider-form-error" id="provider-form-error" role="alert" aria-live="assertive" hidden></p>
             <div class="modal-actions">
               <button class="ghost" id="provider-login" type="button" data-i18n="providerModal.relogin" hidden>Relogin</button>
               <button class="ghost" id="provider-cancel" type="button" data-i18n="common.cancel">Cancel</button>
@@ -2847,6 +2870,7 @@ function renderConfigPage(): string {
       let activeFeishuSessionKey = "";
       let currentLanguage = "en";
       let lastEditorState = null;
+      let providerFormError = null;
       const usageFilters = {
         preset: "all",
         recentValue: "1个月",
@@ -2869,6 +2893,13 @@ function renderConfigPage(): string {
       const SVG_NS = "http://www.w3.org/2000/svg";
       const CODEX_OAUTH_TYPE_LABEL = "Codex-Oauth";
       const SECRET_MASK = "••••••••••••••••••••••••";
+      const PROVIDER_ERROR_TRANSLATION_KEYS = {
+        "provider_id_required": "providerError.providerIdRequired",
+        "provider_id_invalid": "providerError.providerIdInvalid",
+        "provider_id_builtin": "providerError.providerIdBuiltin",
+        "base_url_invalid": "providerError.baseUrlInvalid",
+        "base_url_protocol_invalid": "providerError.baseUrlProtocolInvalid",
+      };
       const comboStates = new Map();
 
       // UI translations stay client-side so the config API remains unchanged.
@@ -2944,7 +2975,13 @@ function renderConfigPage(): string {
           "providerModal.modelsHelp": "Add one model at a time. The default model will be saved with the list.",
           "providerModal.relogin": "Relogin",
           "providerModal.save": "Save Provider",
-          "providerModal.keepKey": "Leave blank to keep saved key",
+          "providerModal.keepKey": "Optional for unauthenticated or local endpoints. Clear the field to remove the saved key.",
+          "providerError.saveFailed": "Could not save Provider. Check the form and try again.",
+          "providerError.providerIdRequired": "Enter a Provider ID.",
+          "providerError.providerIdInvalid": "Provider ID must start with a lowercase letter and contain only lowercase letters, numbers, - or _.",
+          "providerError.providerIdBuiltin": "This Provider ID is built in. Choose a different ID.",
+          "providerError.baseUrlInvalid": "Enter a valid Base URL, for example https://api.example.com/v1.",
+          "providerError.baseUrlProtocolInvalid": "Base URL must start with http:// or https://.",
           "common.cancel": "Cancel",
           "common.close": "Close",
           "combo.noMatches": "No matches",
@@ -3153,7 +3190,13 @@ function renderConfigPage(): string {
           "providerModal.modelsHelp": "每次添加一个模型。默认模型会随列表一起保存。",
           "providerModal.relogin": "重新登录",
           "providerModal.save": "保存 Provider",
-          "providerModal.keepKey": "留空以保留已保存的 key",
+          "providerModal.keepKey": "可选；无鉴权或内网接口可以留空。清空后保存会删除已保存的 key。",
+          "providerError.saveFailed": "Provider 保存失败，请检查表单后重试。",
+          "providerError.providerIdRequired": "请填写 Provider ID。",
+          "providerError.providerIdInvalid": "Provider ID 必须以小写字母开头，且只能包含小写字母、数字、- 或 _。",
+          "providerError.providerIdBuiltin": "该 Provider ID 是内置 Provider，请换一个 ID。",
+          "providerError.baseUrlInvalid": "请输入有效的 Base URL，例如 https://api.example.com/v1。",
+          "providerError.baseUrlProtocolInvalid": "Base URL 必须以 http:// 或 https:// 开头。",
           "common.cancel": "取消",
           "common.close": "关闭",
           "combo.noMatches": "没有匹配项",
@@ -3319,6 +3362,7 @@ function renderConfigPage(): string {
       const providerModelInputEl = document.querySelector("#provider-model-input");
       const providerModelAddButton = document.querySelector("#provider-model-add");
       const providerModelListEl = document.querySelector("#provider-model-list");
+      const providerFormErrorEl = document.querySelector("#provider-form-error");
       const configChannelSummaryEl = document.querySelector("#config-channel-summary");
       const feishuConfigFormEl = document.querySelector("#feishu-config-form");
       const feishuAccountListEl = document.querySelector("#feishu-account-list");
@@ -3369,7 +3413,11 @@ function renderConfigPage(): string {
           ...options,
         });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Request failed");
+        if (!response.ok) {
+          const error = new Error(data.error || "Request failed");
+          error.code = data.code || "";
+          throw error;
+        }
         return data;
       }
 
@@ -3412,6 +3460,7 @@ function renderConfigPage(): string {
         updateLanguageButton();
         updateThemeButton(document.documentElement.dataset.theme || "dark");
         updateProviderModalTitle();
+        renderProviderFormError();
         renderProviderModelList();
         renderFeishuConfig(feishuConfigState);
         renderEffectiveDefaults(lastEditorState);
@@ -3441,6 +3490,35 @@ function renderConfigPage(): string {
       function setStatus(message, isError = false) {
         statusEl.textContent = message;
         statusEl.style.color = isError ? "var(--danger)" : "var(--accent)";
+      }
+
+      // 在 Provider 弹窗内按当前语言渲染校验错误。
+      function renderProviderFormError() {
+        if (!providerFormError) {
+          providerFormErrorEl.textContent = "";
+          providerFormErrorEl.hidden = true;
+          return;
+        }
+        const translationKey = PROVIDER_ERROR_TRANSLATION_KEYS[providerFormError.code];
+        providerFormErrorEl.textContent = translationKey
+          ? t(translationKey)
+          : providerFormError.message || t("providerError.saveFailed");
+        providerFormErrorEl.hidden = false;
+      }
+
+      // 保存错误对象，确保切换语言时可以重新翻译。
+      function setProviderFormError(error) {
+        providerFormError = {
+          code: error?.code || "",
+          message: error?.message || "",
+        };
+        renderProviderFormError();
+      }
+
+      // 在重新操作表单前移除过期错误。
+      function clearProviderFormError() {
+        providerFormError = null;
+        renderProviderFormError();
       }
 
       // Render terminal connection state in the compact toolbar.
@@ -4110,6 +4188,7 @@ function renderConfigPage(): string {
 
       // Reset the provider form back to create mode.
       function resetProviderForm() {
+        clearProviderFormError();
         editingProviderId = "";
         editingProviderSource = "";
         updateProviderModalTitle();
@@ -4137,7 +4216,7 @@ function renderConfigPage(): string {
         }
       }
 
-      // Treat the synthetic mask as "keep existing key" when saving.
+      // 未修改的掩码表示省略 key 字段，让后端保留原值。
       function isProviderKeyMasked() {
         return providerKeyEl.dataset.masked === "true" && providerKeyEl.value === SECRET_MASK;
       }
@@ -4145,7 +4224,7 @@ function renderConfigPage(): string {
       // Convert the provider form to an API payload without sending the mask string.
       function normalizedProviderPayload(form) {
         const payload = Object.fromEntries(new FormData(form));
-        if (isProviderKeyMasked()) payload.apiKey = "";
+        if (isProviderKeyMasked()) delete payload.apiKey;
         return payload;
       }
 
@@ -4229,6 +4308,7 @@ function renderConfigPage(): string {
 
       // Open the provider modal for either create or edit mode.
       function openProviderModal() {
+        clearProviderFormError();
         providerModal.hidden = false;
         document.body.classList.add("modal-open");
         providerIdEl.focus();
@@ -6134,6 +6214,7 @@ function renderConfigPage(): string {
           editingProviderSource === "builtin" && editingProviderId
             ? "/api/builtin-providers/" + encodeURIComponent(editingProviderId)
             : "/api/custom-providers";
+        clearProviderFormError();
         try {
           await requestJson(endpoint, {
             method: "POST",
@@ -6144,7 +6225,7 @@ function renderConfigPage(): string {
           setStatus(wasEditing ? t("status.providerUpdated") : t("status.providerSaved"));
           await loadState();
         } catch (err) {
-          setStatus(err.message, true);
+          setProviderFormError(err);
         }
       });
 

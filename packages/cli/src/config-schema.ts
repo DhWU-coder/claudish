@@ -34,7 +34,7 @@ export const CustomEndpointSimpleSchema = z.object({
   kind: z.literal("simple"),
   url: z.url(),
   format: z.enum(["openai", "anthropic", "gemini"]),
-  apiKey: z.string().min(1),
+  apiKey: z.string(),
   defaultModel: z.string().min(1).optional(),
   modelPrefix: z.string().optional(),
   models: z.array(z.string()).optional(),

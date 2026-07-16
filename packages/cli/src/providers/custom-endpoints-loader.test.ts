@@ -63,6 +63,24 @@ describe("custom-endpoints-loader", () => {
     expect(getRuntimeProfiles().get("my-vllm")).toBeDefined();
   });
 
+  test("valid simple endpoint without api key: registers and is retrievable", () => {
+    const result = loadCustomEndpoints(
+      makeConfig({
+        "local-no-auth": {
+          kind: "simple",
+          url: "http://127.0.0.1:8000/v1",
+          format: "openai",
+          apiKey: "",
+        },
+      })
+    );
+
+    expect(result.registered).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(getRuntimeProviders().get("local-no-auth")).toBeDefined();
+    expect(getRuntimeProfiles().get("local-no-auth")).toBeDefined();
+  });
+
   test("valid simple gemini endpoint: registers gemini transport and default model alias", () => {
     const config = makeConfig({
       "my-gemini": {

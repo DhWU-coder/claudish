@@ -110,6 +110,96 @@ describe("web config server", () => {
     expect(html).not.toContain('list="provider-options"');
   });
 
+  test("GET / 的 Provider 表单关闭浏览器历史自动填充", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const formStart = html.indexOf('<form id="provider-form"');
+    const providerForm = html.slice(formStart, html.indexOf("</form>", formStart));
+
+    expect(providerForm).toContain('<form id="provider-form" autocomplete="off">');
+    expect(providerForm).toContain(
+      '<input id="provider-id" name="providerId" placeholder="corp-openai" autocomplete="off" required />'
+    );
+    expect(providerForm).toContain(
+      '<input id="provider-url" name="baseUrl" placeholder="https://api.example.com/v1" autocomplete="off" required />'
+    );
+    expect(providerForm).toContain('autocomplete="new-password"');
+  });
+
+  test("GET / 明确说明 Provider API key 可以留空", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const chineseHelp = "可选；无鉴权或内网接口可以留空。清空后保存会删除已保存的 key。";
+    const renderedChineseHelp = Array.from(chineseHelp, (character) =>
+      character.charCodeAt(0) > 127
+        ? `\\u${character.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`
+        : character
+    ).join("");
+
+    expect(html).toContain(
+      '"providerModal.keepKey": "Optional for unauthenticated or local endpoints. Clear the field to remove the saved key."'
+    );
+    expect(html).toContain(`"providerModal.keepKey": "${renderedChineseHelp}"`);
+  });
+
+  test("GET / 在 Provider 表单内部渲染错误告警区域", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const formStart = html.indexOf('<form id="provider-form"');
+    const providerForm = html.slice(formStart, html.indexOf("</form>", formStart));
+
+    expect(providerForm).toContain(
+      '<p class="provider-form-error" id="provider-form-error" role="alert" aria-live="assertive" hidden></p>'
+    );
+    expect(html).toContain(".provider-form-error {");
+    expect(html).toContain(".provider-form-error[hidden] {");
+  });
+
+  test("GET / 将 Provider 保存错误本地化后显示在弹窗内", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const submitStart = html.indexOf('providerForm.addEventListener("submit"');
+    const submitEnd = html.indexOf('feishuConfigFormEl.addEventListener("submit"', submitStart);
+    const submitHandler = html.slice(submitStart, submitEnd);
+    const chineseMessage = "Provider ID 必须以小写字母开头，且只能包含小写字母、数字、- 或 _。";
+    const renderedChineseMessage = Array.from(chineseMessage, (character) =>
+      character.charCodeAt(0) > 127
+        ? `\\u${character.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`
+        : character
+    ).join("");
+
+    expect(html).toContain('"provider_id_invalid": "providerError.providerIdInvalid"');
+    expect(html).toContain(
+      '"providerError.providerIdInvalid": "Provider ID must start with a lowercase letter and contain only lowercase letters, numbers, - or _."'
+    );
+    expect(html).toContain(`"providerError.providerIdInvalid": "${renderedChineseMessage}"`);
+    expect(html).toContain('error.code = data.code || "";');
+    expect(submitHandler).toContain("clearProviderFormError();");
+    expect(submitHandler).toContain("setProviderFormError(err);");
+    expect(submitHandler).not.toContain("setStatus(err.message, true);");
+  });
+
+  test("GET / 在 Provider 弹窗生命周期变化时刷新或清理错误", async () => {
+    const response = await handleConfigWebRequest(request("/"));
+    const html = await response.text();
+    const languageBlock = html.slice(
+      html.indexOf("function applyLanguage"),
+      html.indexOf("function updateLanguageButton")
+    );
+    const resetBlock = html.slice(
+      html.indexOf("function resetProviderForm"),
+      html.indexOf("function applyMaskedProviderKey")
+    );
+    const openBlock = html.slice(
+      html.indexOf("function openProviderModal"),
+      html.indexOf("function closeProviderModal")
+    );
+
+    expect(languageBlock).toContain("renderProviderFormError();");
+    expect(resetBlock).toContain("clearProviderFormError();");
+    expect(openBlock).toContain("clearProviderFormError();");
+  });
+
   test("GET / renders channel overview on the config page instead of the Feishu editor", async () => {
     const response = await handleConfigWebRequest(request("/"));
     const html = await response.text();
@@ -159,6 +249,7 @@ describe("web config server", () => {
     expect(html).toContain("applyMaskedProviderKey");
     expect(html).toContain("isProviderKeyMasked");
     expect(html).toContain("normalizedProviderPayload");
+    expect(html).toContain("delete payload.apiKey");
   });
 
   test("GET / renders full-width tabs in usage-first order", async () => {
@@ -1018,6 +1109,26 @@ describe("web config server", () => {
     expect(openrouter?.defaultModel).toBe("openai/gpt-5");
   });
 
+  test("POST /api/builtin-providers/:id clears an API-key builtin credential when empty", async () => {
+    saveConfig({
+      ...loadConfig(),
+      apiKeys: { OPENROUTER_API_KEY: "old-openrouter-key" },
+    });
+
+    const response = await handleConfigWebRequest(
+      request("/api/builtin-providers/or", {
+        method: "POST",
+        body: JSON.stringify({
+          apiKey: "",
+          defaultModel: "openai/gpt-5",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(loadConfig().apiKeys?.OPENROUTER_API_KEY).toBeUndefined();
+  });
+
   test("POST /api/oauth-login/:id triggers the configured login handler", async () => {
     const calls: string[] = [];
     const response = await handleConfigWebRequest(
@@ -1096,6 +1207,45 @@ describe("web config server", () => {
     });
   });
 
+  test("POST /api/custom-providers 对非法 Provider ID 返回稳定错误码", async () => {
+    const response = await handleConfigWebRequest(
+      request("/api/custom-providers", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "11",
+          format: "openai",
+          baseUrl: "https://llm.example.com/v1",
+          apiKey: "sk-test",
+        }),
+      })
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toContain("start with a letter");
+    expect(body.code).toBe("provider_id_invalid");
+  });
+
+  test("POST /api/custom-providers 允许新建 Provider 留空 API key", async () => {
+    const response = await handleConfigWebRequest(
+      request("/api/custom-providers", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "local-no-auth",
+          format: "openai",
+          baseUrl: "http://127.0.0.1:8000/v1",
+          apiKey: "",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(loadConfig().customEndpoints?.["local-no-auth"]).toMatchObject({
+      kind: "simple",
+      apiKey: "",
+    });
+  });
+
   test("POST /api/custom-providers preserves an existing key when editing without a new key", async () => {
     // Editing rows from the provider table should not require retyping the
     // existing secret every time.
@@ -1119,7 +1269,6 @@ describe("web config server", () => {
           providerId: "corp-openai",
           format: "anthropic",
           baseUrl: "https://new.example.com/v1",
-          apiKey: "",
           defaultModel: "claude-opus-4-7",
           models: "claude-opus-4-7\nclaude-sonnet-4-7",
         }),
@@ -1135,6 +1284,35 @@ describe("web config server", () => {
       defaultModel: "claude-opus-4-7",
       models: ["claude-opus-4-7", "claude-sonnet-4-7"],
     });
+  });
+
+  test("POST /api/custom-providers clears an existing key when apiKey is explicitly empty", async () => {
+    await handleConfigWebRequest(
+      request("/api/custom-providers", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "corp-openai",
+          format: "openai",
+          baseUrl: "https://old.example.com/v1",
+          apiKey: "sk-existing",
+        }),
+      })
+    );
+
+    const response = await handleConfigWebRequest(
+      request("/api/custom-providers", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "corp-openai",
+          format: "anthropic",
+          baseUrl: "https://new.example.com/v1",
+          apiKey: "",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(loadConfig().customEndpoints?.["corp-openai"]?.apiKey).toBe("");
   });
 
   test("GET /api/custom-providers/:id/secret returns the saved key for local reveal", async () => {
