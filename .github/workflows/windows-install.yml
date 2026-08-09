@@ -1,0 +1,31 @@
+name: Windows Source Install
+
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "bun.lock"
+      - "scripts/install-windows.ps1"
+      - "scripts/create-windows-staging.cjs"
+      - "packages/cli/**"
+      - "packages/macos-bridge/package.json"
+      - ".github/workflows/windows-install.yml"
+  workflow_dispatch:
+
+jobs:
+  windows-install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Test cross-platform launcher
+        run: node --test packages/cli/scripts/claudish-launcher.test.cjs
+
+      - name: Install and build on Windows
+        shell: powershell
+        run: ./scripts/install-windows.ps1 -Clean -SkipLink
+
+      - name: Verify linked launcher entry
+        run: node packages/cli/bin/claudish.cjs --version

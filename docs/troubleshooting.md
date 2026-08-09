@@ -6,6 +6,33 @@
 
 ## Installation Issues
 
+### Windows: `EPERM (NtSetInformationFile)` during `bun install`
+
+The root workspace contains native development tools and a macOS-only bridge. On Windows, use the repository's platform-specific installer instead of a plain root `bun install`:
+
+```powershell
+bun run install:windows -- -Clean
+```
+
+This removes only generated dependency directories inside the repository, disables Bun's global package cache for the install, uses the copyfile backend, builds the CLI, and links it globally. It does not change the macOS/Linux installation path.
+
+For a CLI development install that includes lint, typecheck, and test dependencies:
+
+```powershell
+bun run install:windows -- -Clean -Dev
+```
+
+### Windows: `claudish` says Bun is not installed
+
+Rebuild and relink after updating the repository so the cross-platform launcher is installed:
+
+```powershell
+bun run --cwd packages/cli build
+cd packages/cli
+bun link
+claudish --version
+```
+
 ### "command not found: claudish"
 
 **With npx (no install):**

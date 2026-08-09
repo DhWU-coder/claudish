@@ -83,6 +83,25 @@ Claudish is a **BYOK AI coding assistant**:
 
 ### Install from Source
 
+#### Windows PowerShell
+
+```powershell
+git clone https://github.com/DhWU-coder/claudish.git
+cd claudish
+bun run install:windows
+claudish --version
+```
+
+If an earlier install failed with `EPERM (NtSetInformationFile)`, reinstall in clean mode:
+
+```powershell
+bun run install:windows -- -Clean
+```
+
+The Windows installer skips macOS-bridge-only dependencies and uses a copy-based installation that does not rely on Bun's global package cache. It installs only runtime/build dependencies by default; append `-Dev` when linting, typechecking, or running the CLI test suite.
+
+#### macOS / Linux
+
 ```bash
 git clone https://github.com/DhWU-coder/claudish.git
 cd claudish

@@ -64,6 +64,25 @@ claudish --model ollama@qwen3-coder:latest "你的任务"
 
 ### 从源码安装
 
+#### Windows PowerShell
+
+```powershell
+git clone https://github.com/DhWU-coder/claudish.git
+cd claudish
+bun run install:windows
+claudish --version
+```
+
+如果之前的安装已经因 `EPERM (NtSetInformationFile)` 失败，使用清理模式重新安装：
+
+```powershell
+bun run install:windows -- -Clean
+```
+
+Windows 安装入口会跳过仅供 macOS bridge 使用的依赖，并使用不依赖 Bun 全局缓存的复制安装策略。默认只安装运行和构建 CLI 所需的依赖；需要运行 CLI 的 lint、typecheck 或测试时可追加 `-Dev`。
+
+#### macOS / Linux
+
 ```bash
 git clone https://github.com/DhWU-coder/claudish.git
 cd claudish

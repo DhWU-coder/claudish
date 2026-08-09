@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-console.log("\x1b[32m✓ Claudish installed successfully!\x1b[0m");
+console.log("\x1b[32m✓ Claudish dependency setup script completed.\x1b[0m");
+console.log("The installation is successful only if the package manager exits without errors.");
 console.log("");
 console.log("\x1b[1mUsage:\x1b[0m");
 console.log('  claudish --model x-ai/grok-code-fast-1 "your prompt"');
